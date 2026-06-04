@@ -109,8 +109,9 @@ a password (the `scan` output says `UNREGISTERED`), the password is the device's
 
 ## Status / notes
 
-* Protocol fully decoded; encoder/parser are byte-verified against the app. **Not yet tested against
-  live hardware** — that needs the generator in range. Run with `-v` and share output if a step hangs.
+* **Tested hardware:** confirmed working on a **Cummins Onan QG 4000** (with the EC-AGS+ controller) —
+  connect/auth, live telemetry, and Start/Stop all verified end-to-end. Other EC-AGS+-equipped gensets
+  very likely work too (same BLE module); reports welcome. Run with `-v` and share output if a step hangs.
 * The app only ever uses a 20-byte MTU and paces multi-chunk writes via a counter characteristic;
   `agscli.py` replicates this. Control commands (start/stop/status) are single-chunk.
 * Bring your own device: you'll need the official app once to set/learn your generator's password.
