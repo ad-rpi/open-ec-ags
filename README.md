@@ -1,4 +1,6 @@
 # RV Generator — Cummins EC-AGS+ BLE control
+* NOTE: Claude AI was used in the making of this for BLE analysis and decoding. All testing with a real generator
+was done by a real person.
 
 Control a Cummins EC-AGS+ generator from a **Mac** or **Raspberry Pi** over Bluetooth LE — a CLI, a
 web dashboard, and a scheduler, as an alternative to the official phone app. The BLE protocol was
@@ -124,3 +126,4 @@ a password (the `scan` output says `UNREGISTERED`), the password is the device's
   `agscli.py` replicates this. Control commands (start/stop/status) are single-chunk.
 * Bring your own device: you'll need the official app once to set/learn your generator's password.
   No decompiled app source is included in this repo.
+
