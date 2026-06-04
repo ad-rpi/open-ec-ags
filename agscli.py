@@ -197,6 +197,8 @@ class AGS:
         self.verbose = verbose
         self._rx = bytearray()         # accumulates FROM_GENSET_DATA chunks
         self._rx_counter = 0
+        self._rx_last_chunk = b""      # last chunk taken, to detect genset resends
+        self._rx_lock = asyncio.Lock()  # serialize chunk handling + acks (in-order)
         self._app_counter = asyncio.Event()  # set when genset asks for next write chunk
         self._rpc_waiters = {}         # opcode -> asyncio.Future
         self.telemetry = {}            # name -> decoded dict
@@ -227,21 +229,39 @@ class AGS:
         return cb
 
     def _on_genset_data(self, _ch, data):
-        self._rx += bytes(data)
-        # complete when we have the le16-prefixed length
-        if len(self._rx) >= 2:
-            want = self._rx[0] | (self._rx[1] << 8)   # length of the RPC buffer following the prefix
-            if want and len(self._rx) >= want + 2:
-                buf = bytes(self._rx[2:want + 2])
-                self._rx = bytearray()
-                self._rx_counter = 0
-                asyncio.create_task(self._ack_genset(0))
-                self._dispatch_rpc(buf)
+        # Hand off to a serialized async handler: chunk reassembly AND the flow-control acks
+        # must happen strictly in order. Fire-and-forget acks could go out late/out-of-order,
+        # making the genset resend a chunk → duplicated bytes → corrupted reassembly → CRC fail.
+        asyncio.create_task(self._handle_genset_data(bytes(data)))
+
+    async def _handle_genset_data(self, data):
+        # Lock-step: the genset sends one chunk, waits for a counter ack, then sends the next.
+        async with self._rx_lock:
+            # A resent chunk (genset missed/was-slow-to-get our ack) is byte-identical to the last
+            # one we accepted. Re-send the same ack to nudge it forward, but DON'T append it again.
+            if data and data == self._rx_last_chunk:
+                self._log(f"rx duplicate chunk -> re-ack {self._rx_counter}")
+                await self._ack_genset(self._rx_counter)
                 return
-        # partial: ack with running counter to request next chunk
-        if self._rx_counter < 255:
-            self._rx_counter += 1
-            asyncio.create_task(self._ack_genset(self._rx_counter))
+            self._rx_last_chunk = data
+            self._rx += data
+            self._log(f"rx chunk +{len(data)}B (total {len(self._rx)})")
+            if len(self._rx) >= 2:
+                want = self._rx[0] | (self._rx[1] << 8)   # length of the RPC buffer after the prefix
+                if want and len(self._rx) >= want + 2:
+                    buf = bytes(self._rx[2:want + 2])
+                    extra = len(self._rx) - (want + 2)
+                    self._rx = bytearray()
+                    self._rx_counter = 0
+                    self._rx_last_chunk = b""
+                    self._log(f"rx complete want={want} extra={extra} -> ack 0")
+                    await self._ack_genset(0)
+                    self._dispatch_rpc(buf)
+                    return
+            if self._rx_counter < 255:                    # partial: ack to request the next chunk
+                self._rx_counter += 1
+                self._log(f"rx partial -> ack {self._rx_counter}")
+                await self._ack_genset(self._rx_counter)
 
     async def _ack_genset(self, n):
         try:
