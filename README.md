@@ -112,6 +112,14 @@ a password (the `scan` output says `UNREGISTERED`), the password is the device's
 * **Tested hardware:** confirmed working on a **Cummins Onan QG 4000** (with the EC-AGS+ controller) —
   connect/auth, live telemetry, and Start/Stop all verified end-to-end. Other EC-AGS+-equipped gensets
   very likely work too (same BLE module); reports welcome. Run with `-v` and share output if a step hangs.
+* **What telemetry you get depends on your genset's integration.** On the tested unit, the EC-AGS+
+  reports **run state, output voltage, battery DC volts, SOC, fault code, and run-time** — but **not**
+  engine RPM, output frequency, load, engine/oil/manifold/inverter temps, or lifetime hours (those came
+  back as `0xFF` "not available" even while running — the controller isn't wired into the engine ECU for
+  them on that genset). Those fields are decoded but **unverified**, so they live in an explicit
+  **⚠ UNTESTED** section at the bottom of the dashboard's Settings, off by default. A different install
+  with deeper engine integration may populate them — enable to try. Missing values show as `—`, never a
+  fabricated number.
 * The app only ever uses a 20-byte MTU and paces multi-chunk writes via a counter characteristic;
   `agscli.py` replicates this. Control commands (start/stop/status) are single-chunk.
 * Bring your own device: you'll need the official app once to set/learn your generator's password.

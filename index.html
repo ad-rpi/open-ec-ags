@@ -262,11 +262,11 @@ const FV = {
   bool:(v)=> v==null?'—':(v?'Yes':'No'),
   fault:(v)=> v==null?'—':(v? ('⚠ '+v) : 'none'),
 };
+// Confirmed on hardware (Onan QG 4000): state, output voltage, battery DC volts, SOC, fault, runtime.
+// `unt:true` = the genset reported these as "not available" (0xFF) even while running — decode
+// unverified, so they live in the UNTESTED section and default off.
 const METRICS = [
   {k:'out_v',     g:'Power',  label:'Output voltage',    src:'readings', f:'output_vac',     u:'VAC', def:true},
-  {k:'out_hz',    g:'Power',  label:'Output frequency',  src:'readings', f:'output_hz',      u:'Hz',  def:true},
-  {k:'load',      g:'Power',  label:'Load',              src:'readings', f:'load_%',         u:'%',   def:true},
-  {k:'cur',       g:'Power',  label:'Load current',      src:'readings', f:'load_current_a', u:'A',   def:false},
   {k:'house_v',   g:'Batteries', label:'House battery',  src:'dcvolts',  f:'house_v',        u:'V',   def:true},
   {k:'house_soc', g:'Batteries', label:'House SOC',      src:'status',   f:'soc_house_%',    u:'%',   def:true},
   {k:'start_v',   g:'Batteries', label:'Start battery',  src:'dcvolts',  f:'engine_v',       u:'V',   def:true},
@@ -275,19 +275,23 @@ const METRICS = [
   {k:'house_v_l', g:'Batteries', label:'House V (long avg)',  src:'dcvolts', f:'house_v_long',  u:'V', def:false},
   {k:'start_v_s', g:'Batteries', label:'Start V (short avg)', src:'dcvolts', f:'engine_v_short',u:'V', def:false},
   {k:'start_v_l', g:'Batteries', label:'Start V (long avg)',  src:'dcvolts', f:'engine_v_long', u:'V', def:false},
-  {k:'rpm',     g:'Engine & monitor', label:'Engine RPM',        src:'readings', f:'engine_rpm',        def:true},
-  {k:'ehours',  g:'Engine & monitor', label:'Engine hours',      src:'readings', f:'engine_hours', u:'h',def:false},
-  {k:'etemp',   g:'Engine & monitor', label:'Engine temp',       src:'readings', f:'engine_temp',       def:false},
-  {k:'oil',     g:'Engine & monitor', label:'Oil temp',          src:'mondata',  f:'oil_temp',          def:false},
-  {k:'manp',    g:'Engine & monitor', label:'Manifold pressure', src:'mondata',  f:'manifold_pressure', def:false},
-  {k:'mant',    g:'Engine & monitor', label:'Manifold temp',     src:'mondata',  f:'manifold_temp',     def:false},
-  {k:'invt',    g:'Engine & monitor', label:'Inverter temp',     src:'mondata',  f:'inverter_temp',     def:false},
-  {k:'fpump',   g:'Engine & monitor', label:'Fuel pump',         src:'mondata',  f:'fuel_pump', fmt:'bool', def:false},
-  {k:'starter', g:'Engine & monitor', label:'Starter',           src:'mondata',  f:'starter',   fmt:'bool', def:false},
   {k:'fault',     g:'Status', label:'Fault code',          src:'status', f:'fault_code',   fmt:'fault', def:true},
   {k:'run',       g:'Status', label:'Run time (this start)',src:'status', f:'run_seconds',  fmt:'run',   def:true},
   {k:'laststart', g:'Status', label:'Last started',        src:'status', f:'last_started', fmt:'date',  def:false},
   {k:'quiet',     g:'Status', label:'Quiet time active',   src:'status', f:'quiet_time',   fmt:'bool',  def:false},
+  // --- UNTESTED: reported 0xFF / "not available" on tested hardware; decode unverified ---
+  {k:'out_hz',  label:'Output frequency',  src:'readings', f:'output_hz',      u:'Hz', unt:true, def:false},
+  {k:'load',    label:'Load',              src:'readings', f:'load_%',         u:'%',  unt:true, def:false},
+  {k:'cur',     label:'Load current',      src:'readings', f:'load_current_a', u:'A',  unt:true, def:false},
+  {k:'rpm',     label:'Engine RPM',        src:'readings', f:'engine_rpm',             unt:true, def:false},
+  {k:'ehours',  label:'Engine hours',      src:'readings', f:'engine_hours',   u:'h',  unt:true, def:false},
+  {k:'etemp',   label:'Engine temp',       src:'readings', f:'engine_temp',            unt:true, def:false},
+  {k:'oil',     label:'Oil temp',          src:'mondata',  f:'oil_temp',               unt:true, def:false},
+  {k:'manp',    label:'Manifold pressure', src:'mondata',  f:'manifold_pressure',      unt:true, def:false},
+  {k:'mant',    label:'Manifold temp',     src:'mondata',  f:'manifold_temp',          unt:true, def:false},
+  {k:'invt',    label:'Inverter temp',     src:'mondata',  f:'inverter_temp',          unt:true, def:false},
+  {k:'fpump',   label:'Fuel pump',         src:'mondata',  f:'fuel_pump', fmt:'bool',  unt:true, def:false},
+  {k:'starter', label:'Starter',           src:'mondata',  f:'starter',   fmt:'bool',  unt:true, def:false},
 ];
 let visible = loadVisible(), lastTelem = {};
 function loadVisible(){
@@ -313,13 +317,23 @@ function renderTelemetry(t){
   updateMetrics(t);
 }
 function renderSettings(){
-  const groups=[...new Set(METRICS.map(m=>m.g))];
-  $('#settingsBody').innerHTML = groups.map(g=>
+  const row = m => `<label class="row" style="cursor:pointer"><span class="k">${m.label}</span>
+        <input type="checkbox" ${visible[m.k]?'checked':''} onchange="toggleMetric('${m.k}',this.checked)"></label>`;
+  const tested = METRICS.filter(m=>!m.unt);
+  const groups=[...new Set(tested.map(m=>m.g))];
+  let html = groups.map(g=>
     `<div style="margin-top:10px"><div class="muted" style="font-size:13px;margin-bottom:4px">${g}</div>`+
-    METRICS.filter(m=>m.g===g).map(m=>
-      `<label class="row" style="cursor:pointer"><span class="k">${m.label}</span>
-        <input type="checkbox" ${visible[m.k]?'checked':''} onchange="toggleMetric('${m.k}',this.checked)"></label>`
-    ).join('')+`</div>`).join('');
+    tested.filter(m=>m.g===g).map(row).join('')+`</div>`).join('');
+  const untested = METRICS.filter(m=>m.unt);
+  if(untested.length){
+    html += `<div style="margin-top:20px;border-top:1px solid var(--line);padding-top:12px">
+      <div style="color:var(--amber);font-weight:600;margin-bottom:2px">⚠ UNTESTED</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">The tested genset (Onan QG 4000) reported
+        these as "not available," so the decode is <b>unverified</b> — values may be wrong, mis-scaled, or
+        absent. Enable only to experiment on a unit that might report them.</div>`
+      + untested.map(row).join('') + `</div>`;
+  }
+  $('#settingsBody').innerHTML = html;
 }
 function toggleMetric(k,on){ visible[k]=on; saveVisible(); buildMetrics(); }
 function setAllMetrics(on){ METRICS.forEach(m=>visible[m.k]=on); saveVisible(); buildMetrics(); renderSettings(); }
