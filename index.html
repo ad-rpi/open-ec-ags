@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EC-AGS+ Generator</title>
+<style>
+  :root { --bg:#0e1116; --panel:#171c24; --line:#262d39; --fg:#e6edf3; --mut:#8b97a7;
+          --accent:#2f81f7; --green:#2ea043; --red:#d8403a; --amber:#d29922; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:17px; margin:0; font-weight:600; }
+  #conn { margin-left:auto; font-size:13px; color:var(--mut); display:flex; align-items:center; gap:8px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--mut); }
+  .dot.connected { background:var(--green); } .dot.connecting { background:var(--amber); }
+  .dot.error { background:var(--red); }
+  nav { display:flex; gap:4px; padding:10px 16px 0; border-bottom:1px solid var(--line); }
+  nav button { background:none; border:none; color:var(--mut); padding:9px 14px; cursor:pointer;
+               font-size:14px; border-bottom:2px solid transparent; }
+  nav button.active { color:var(--fg); border-bottom-color:var(--accent); }
+  main { padding:20px; max-width:760px; margin:0 auto; }
+  .tab { display:none; } .tab.active { display:block; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:14px; }
+  .row { display:flex; justify-content:space-between; align-items:center; padding:6px 0; }
+  .row .k { color:var(--mut); } .row .v { font-variant-numeric:tabular-nums; font-weight:600; }
+  .big { font-size:34px; font-weight:700; }
+  button.act { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:11px 16px;
+               font-size:15px; cursor:pointer; font-weight:600; }
+  button.act.green { background:var(--green); } button.act.red { background:var(--red); }
+  button.act.ghost { background:transparent; border:1px solid var(--line); color:var(--fg); font-weight:500; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px 16px; }
+  label { display:block; font-size:13px; color:var(--mut); margin:10px 0 3px; }
+  input[type=text],input[type=password],input[type=number],select {
+     width:100%; background:#0e131a; border:1px solid var(--line); color:var(--fg);
+     border-radius:7px; padding:9px; font-size:14px; }
+  input[type=checkbox]{ width:18px; height:18px; vertical-align:middle; }
+  .dev { display:flex; align-items:center; gap:12px; padding:11px; border:1px solid var(--line);
+         border-radius:9px; margin-bottom:8px; }
+  .dev .meta { flex:1; } .dev .meta small { color:var(--mut); }
+  .pill { font-size:11px; padding:2px 8px; border-radius:20px; border:1px solid var(--line); color:var(--mut); }
+  .pill.reg { color:var(--green); border-color:var(--green); }
+  .pill.unreg { color:var(--amber); border-color:var(--amber); }
+  #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#21262d;
+           border:1px solid var(--line); padding:10px 18px; border-radius:8px; opacity:0;
+           transition:opacity .2s; pointer-events:none; }
+  #toast.show { opacity:1; }
+  .muted { color:var(--mut); font-size:13px; }
+  .state-banner { padding:10px 14px; border-radius:8px; margin-bottom:14px; font-size:14px; display:none; }
+  .state-banner.err { display:block; background:#3a1a18; border:1px solid var(--red); color:#ffb3ae; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ EC-AGS+ Generator</h1>
+  <div id="conn"><span class="dot" id="dot"></span><span id="connText">disconnected</span>
+     <button class="act ghost" id="discBtn" style="padding:5px 10px;font-size:12px;display:none">Disconnect</button>
+  </div>
+</header>
+<nav>
+  <button data-tab="control" class="active">Control</button>
+  <button data-tab="auto">Auto Start/Stop</button>
+  <button data-tab="quiet">Quiet Time</button>
+  <button data-tab="schedule">Schedule</button>
+  <button data-tab="history">History</button>
+  <button data-tab="devices">Devices</button>
+  <button data-tab="settings">⚙</button>
+</nav>
+<main>
+  <div id="errBanner" class="state-banner err"></div>
+
+  <!-- CONTROL -->
+  <section class="tab active" id="tab-control">
+    <div class="card" style="text-align:center">
+      <div class="big" id="genState">—</div>
+      <div class="muted" id="genSub"></div>
+      <div class="btns" style="justify-content:center;margin-top:14px">
+        <button class="act green" onclick="cmd('start')" id="startBtn">Start</button>
+        <button class="act red" onclick="cmd('stop')" id="stopBtn">Stop</button>
+        <button class="act ghost" onclick="cmd('auto-on')">Auto ON</button>
+        <button class="act ghost" onclick="cmd('auto-off')">Auto OFF</button>
+        <button class="act ghost" onclick="cmd('reset-fault')">Reset Fault</button>
+      </div>
+    </div>
+    <div class="card"><div id="metrics"></div></div>
+    <p class="muted" id="noConnHint">Connect to a generator on the <b>Devices</b> tab first.</p>
+  </section>
+
+  <!-- AUTO -->
+  <section class="tab" id="tab-auto">
+    <div class="card">
+      <h3 style="margin-top:0">Battery voltage auto start/stop</h3>
+      <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="a_batt"></div>
+      <div class="grid">
+        <div><label>Start when below (V)</label><input type="number" step="0.1" id="a_startv"></div>
+        <div><label>Stop when above (V)</label><input type="number" step="0.1" id="a_stopv"></div>
+        <div><label>Min run time (minutes)</label><input type="number" id="a_stopmin"></div>
+        <div><label>Start delay (seconds)</label><input type="number" id="a_startsec"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Temperature (A/C) auto start</h3>
+      <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="a_ac"></div>
+      <div id="zones"></div>
+    </div>
+    <div class="btns">
+      <button class="act" onclick="saveAuto()">Save</button>
+      <button class="act ghost" onclick="loadAuto()">Reload</button>
+    </div>
+    <p class="muted">Auto mode must also be turned <b>ON</b> (Control tab) for these to take effect.</p>
+  </section>
+
+  <!-- QUIET -->
+  <section class="tab" id="tab-quiet">
+    <div class="card">
+      <div class="row"><label style="margin:0">Quiet time enabled</label><input type="checkbox" id="q_en"></div>
+      <div class="grid">
+        <div><label>Day</label><select id="q_day">
+          <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
+          <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
+          <option value="6">Saturday</option></select></div>
+        <div></div>
+        <div><label>Start time</label><input type="time" id="q_start"></div>
+        <div><label>End time</label><input type="time" id="q_stop"></div>
+      </div>
+    </div>
+    <div class="btns">
+      <button class="act" onclick="saveQuiet()">Save</button>
+      <button class="act ghost" onclick="loadQuiet()">Reload</button>
+    </div>
+    <p class="muted">During quiet time the generator won't auto-start. Times are the genset's local time.</p>
+  </section>
+
+  <!-- SCHEDULE -->
+  <section class="tab" id="tab-schedule">
+    <div class="card">
+      <h3 style="margin-top:0">Add schedule</h3>
+      <p class="muted" style="margin-top:0">Runs on this machine's clock (works even on the Pi with no
+        phone nearby). Independent of the genset's built-in auto mode.</p>
+      <div class="grid">
+        <div><label>Action</label><select id="s_action"><option value="start">Start generator</option>
+          <option value="stop">Stop generator</option></select></div>
+        <div><label>Time</label><input type="time" id="s_time"></div>
+      </div>
+      <label>Device</label><select id="s_device"></select>
+      <label>Days</label>
+      <div id="s_days" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px"></div>
+      <div class="btns" style="margin-top:14px"><button class="act" onclick="addSchedule()">Add schedule</button></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Schedules</h3>
+      <div id="schedList" class="muted">none</div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Recent activity</h3>
+      <pre id="schedLog" class="muted" style="white-space:pre-wrap;margin:0">—</pre>
+    </div>
+  </section>
+
+  <!-- DEVICES -->
+  <section class="tab" id="tab-devices">
+    <div class="card">
+      <div class="row"><h3 style="margin:0">Nearby generators</h3>
+        <button class="act ghost" onclick="scan()" id="scanBtn">Scan</button></div>
+      <div id="scanList" class="muted">Press Scan to search.</div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Saved devices</h3>
+      <div id="savedList" class="muted">none</div>
+    </div>
+    <div class="card">
+      <label class="row" style="cursor:pointer;margin:0"><span class="k">Auto-connect to last device</span>
+        <input type="checkbox" id="autoconn" onchange="setAutoconnect(this.checked)"></label>
+      <div class="muted" id="lastDev" style="margin-top:6px"></div>
+    </div>
+  </section>
+
+  <!-- HISTORY -->
+  <section class="tab" id="tab-history">
+    <div class="card">
+      <div class="row"><h3 style="margin:0">Active fault</h3>
+        <button class="act ghost" onclick="loadHistory()" id="histBtn">Refresh</button></div>
+      <div id="activeFault" class="muted">—</div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Event history</h3>
+      <div id="eventList" class="muted">Connect and press Refresh.</div>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="tab" id="tab-settings">
+    <div class="card">
+      <div class="row"><h3 style="margin:0">Telemetry to show</h3>
+        <span><button class="act ghost" onclick="setAllMetrics(true)">Show all</button>
+              <button class="act ghost" onclick="resetMetrics()">Defaults</button></span></div>
+      <p class="muted" style="margin-top:0">Pick what appears on the Control tab. Saved in this browser.</p>
+      <div id="settingsBody"></div>
+    </div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let connected = false, busy = false, load_devices_cache = {};
+
+function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
+async function api(method, path, body){
+  const r = await fetch(path, {method, headers:body?{'Content-Type':'application/json'}:{}, body:body?JSON.stringify(body):null});
+  if(!r.ok){ const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||r.statusText); }
+  return r.headers.get('content-type')?.includes('json') ? r.json() : r.text();
+}
+
+// tabs
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); $('#tab-'+b.dataset.tab).classList.add('active');
+  if(b.dataset.tab==='auto' && connected) loadAuto();
+  if(b.dataset.tab==='quiet' && connected) loadQuiet();
+  if(b.dataset.tab==='devices') refreshSaved();
+  if(b.dataset.tab==='schedule') refreshSchedules();
+  if(b.dataset.tab==='history' && connected) loadHistory();
+  if(b.dataset.tab==='settings') renderSettings();
+});
+
+// schedule day checkboxes (0=Mon .. 6=Sun)
+const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+$('#s_days').innerHTML = DAYS.map((d,i)=>
+  `<label class="pill" style="cursor:pointer;color:var(--fg)"><input type="checkbox" class="s_day" value="${i}" checked style="width:14px;height:14px"> ${d}</label>`).join('');
+
+// zones
+const zEl=$('#zones');
+for(let i=0;i<3;i++){ zEl.insertAdjacentHTML('beforeend',
+  `<div class="grid"><div><label>Zone ${i+1} name</label><input type="text" id="z${i}name"></div>
+   <div><label>Start above (°)</label><input type="number" id="z${i}temp"></div></div>`); }
+
+// state polling
+async function poll(){
+  try{
+    const s = await api('GET','/api/state');
+    connected = s.state==='connected';
+    $('#dot').className = 'dot '+s.state;
+    $('#connText').textContent = s.state==='connected' ? (s.name||s.address) : s.state;
+    $('#discBtn').style.display = (s.state==='connected'||s.state==='connecting')?'inline-block':'none';
+    $('#errBanner').style.display = s.error?'block':'none';
+    $('#errBanner').textContent = s.error?('⚠ '+s.error):'';
+    $('#noConnHint').style.display = connected?'none':'block';
+    document.querySelectorAll('.act:not(.ghost), #tab-control .act').forEach(b=>{});
+    ['startBtn','stopBtn'].forEach(id=>$('#'+id).disabled=!connected);
+    renderTelemetry(s.telemetry||{});
+  }catch(e){ $('#connText').textContent='server error'; }
+}
+function fmtRun(sec){ if(sec==null) return '—'; const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60); return `${h}h ${m}m`; }
+const FV = {
+  raw:(v,u)=> v==null?'—':(''+v+(u?' '+u:'')),
+  run:(v)=> v==null?'—':fmtRun(v),
+  date:(v)=> (!v)?'—':new Date(v*1000).toLocaleString(),
+  bool:(v)=> v==null?'—':(v?'Yes':'No'),
+  fault:(v)=> v==null?'—':(v? ('⚠ '+v) : 'none'),
+};
+const METRICS = [
+  {k:'out_v',     g:'Power',  label:'Output voltage',    src:'readings', f:'output_vac',     u:'VAC', def:true},
+  {k:'out_hz',    g:'Power',  label:'Output frequency',  src:'readings', f:'output_hz',      u:'Hz',  def:true},
+  {k:'load',      g:'Power',  label:'Load',              src:'readings', f:'load_%',         u:'%',   def:true},
+  {k:'cur',       g:'Power',  label:'Load current',      src:'readings', f:'load_current_a', u:'A',   def:false},
+  {k:'house_v',   g:'Batteries', label:'House battery',  src:'dcvolts',  f:'house_v',        u:'V',   def:true},
+  {k:'house_soc', g:'Batteries', label:'House SOC',      src:'status',   f:'soc_house_%',    u:'%',   def:true},
+  {k:'start_v',   g:'Batteries', label:'Start battery',  src:'dcvolts',  f:'engine_v',       u:'V',   def:true},
+  {k:'start_soc', g:'Batteries', label:'Start SOC',      src:'status',   f:'soc_engine_%',   u:'%',   def:false},
+  {k:'house_v_s', g:'Batteries', label:'House V (short avg)', src:'dcvolts', f:'house_v_short', u:'V', def:false},
+  {k:'house_v_l', g:'Batteries', label:'House V (long avg)',  src:'dcvolts', f:'house_v_long',  u:'V', def:false},
+  {k:'start_v_s', g:'Batteries', label:'Start V (short avg)', src:'dcvolts', f:'engine_v_short',u:'V', def:false},
+  {k:'start_v_l', g:'Batteries', label:'Start V (long avg)',  src:'dcvolts', f:'engine_v_long', u:'V', def:false},
+  {k:'rpm',     g:'Engine & monitor', label:'Engine RPM',        src:'readings', f:'engine_rpm',        def:true},
+  {k:'ehours',  g:'Engine & monitor', label:'Engine hours',      src:'readings', f:'engine_hours', u:'h',def:false},
+  {k:'etemp',   g:'Engine & monitor', label:'Engine temp',       src:'readings', f:'engine_temp',       def:false},
+  {k:'oil',     g:'Engine & monitor', label:'Oil temp',          src:'mondata',  f:'oil_temp',          def:false},
+  {k:'manp',    g:'Engine & monitor', label:'Manifold pressure', src:'mondata',  f:'manifold_pressure', def:false},
+  {k:'mant',    g:'Engine & monitor', label:'Manifold temp',     src:'mondata',  f:'manifold_temp',     def:false},
+  {k:'invt',    g:'Engine & monitor', label:'Inverter temp',     src:'mondata',  f:'inverter_temp',     def:false},
+  {k:'fpump',   g:'Engine & monitor', label:'Fuel pump',         src:'mondata',  f:'fuel_pump', fmt:'bool', def:false},
+  {k:'starter', g:'Engine & monitor', label:'Starter',           src:'mondata',  f:'starter',   fmt:'bool', def:false},
+  {k:'fault',     g:'Status', label:'Fault code',          src:'status', f:'fault_code',   fmt:'fault', def:true},
+  {k:'run',       g:'Status', label:'Run time (this start)',src:'status', f:'run_seconds',  fmt:'run',   def:true},
+  {k:'laststart', g:'Status', label:'Last started',        src:'status', f:'last_started', fmt:'date',  def:false},
+  {k:'quiet',     g:'Status', label:'Quiet time active',   src:'status', f:'quiet_time',   fmt:'bool',  def:false},
+];
+let visible = loadVisible(), lastTelem = {};
+function loadVisible(){
+  let saved={}; try{ saved=JSON.parse(localStorage.getItem('ags_visible')||'{}'); }catch(e){}
+  const v={}; METRICS.forEach(m=> v[m.k] = (m.k in saved)? !!saved[m.k] : m.def); return v;
+}
+function saveVisible(){ localStorage.setItem('ags_visible', JSON.stringify(visible)); }
+function metricVal(t,m){ const v=(t[m.src]||{})[m.f]; return (FV[m.fmt]||FV.raw)(v,m.u); }
+function buildMetrics(){
+  const shown = METRICS.filter(m=>visible[m.k]);
+  $('#metrics').innerHTML = shown.length
+    ? shown.map(m=>`<div class="row"><span class="k">${m.label}</span><span class="v" id="mv_${m.k}">—</span></div>`).join('')
+    : '<span class="muted">Nothing selected — enable items in ⚙ Settings.</span>';
+  updateMetrics(lastTelem);
+}
+function updateMetrics(t){
+  METRICS.forEach(m=>{ if(visible[m.k]){ const el=$('#mv_'+m.k); if(el) el.textContent=metricVal(t,m); }});
+}
+function renderTelemetry(t){
+  lastTelem=t; const st=t.status||{};
+  $('#genState').textContent = st.state || (connected?'…':'—');
+  $('#genSub').textContent = st.auto_mode ? 'Auto mode ON' : (connected?'Manual mode':'');
+  updateMetrics(t);
+}
+function renderSettings(){
+  const groups=[...new Set(METRICS.map(m=>m.g))];
+  $('#settingsBody').innerHTML = groups.map(g=>
+    `<div style="margin-top:10px"><div class="muted" style="font-size:13px;margin-bottom:4px">${g}</div>`+
+    METRICS.filter(m=>m.g===g).map(m=>
+      `<label class="row" style="cursor:pointer"><span class="k">${m.label}</span>
+        <input type="checkbox" ${visible[m.k]?'checked':''} onchange="toggleMetric('${m.k}',this.checked)"></label>`
+    ).join('')+`</div>`).join('');
+}
+function toggleMetric(k,on){ visible[k]=on; saveVisible(); buildMetrics(); }
+function setAllMetrics(on){ METRICS.forEach(m=>visible[m.k]=on); saveVisible(); buildMetrics(); renderSettings(); }
+function resetMetrics(){ METRICS.forEach(m=>visible[m.k]=m.def); saveVisible(); buildMetrics(); renderSettings(); }
+
+async function loadHistory(){
+  $('#histBtn').disabled=true;
+  try{
+    const h=await api('GET','/api/history'); const af=h.active_fault;
+    $('#activeFault').innerHTML = af
+      ? `<b style="color:var(--red)">⚠ Code ${af.code} — ${af.name||'Unknown'}</b><br><small>${af.description||''}</small>`
+      : '<span style="color:var(--green)">No active fault ✓</span>';
+    $('#eventList').innerHTML = (h.events&&h.events.length)
+      ? h.events.map(e=>`<div class="row"><span class="k">${new Date(e.time*1000).toLocaleString()}</span>
+          <span class="v">${e.code}${e.name?(' · '+e.name):''}</span></div>`).join('')
+      : '<span class="muted">No events recorded.</span>';
+  }catch(e){ $('#eventList').textContent='✗ '+e.message; }
+  finally{ $('#histBtn').disabled=false; }
+}
+
+async function cmd(c){
+  if(busy) return; busy=true;
+  try{ await api('POST','/api/command/'+c); toast(c+' sent'); }
+  catch(e){ toast('✗ '+e.message); } finally{ busy=false; }
+}
+
+// scan / devices
+async function scan(){
+  $('#scanBtn').disabled=true; $('#scanList').textContent='Scanning…';
+  try{
+    const list = await api('GET','/api/scan');
+    if(!list.length){ $('#scanList').textContent='No generators found.'; return; }
+    $('#scanList').innerHTML = list.map(d=>{
+      const reg = d.registered===false?'<span class="pill unreg">no password set</span>'
+                : d.registered?'<span class="pill reg">registered</span>':'';
+      return `<div class="dev"><div class="meta"><b>${d.name||'Gateway'}</b> ${reg}<br>
+        <small>${d.address} · ${d.rssi} dBm${d.mac_id?(' · macId '+d.mac_id):''}</small></div>
+        <button class="act ghost" onclick='openSave(${JSON.stringify(d)})'>Save / Connect</button></div>`;
+    }).join('');
+  }catch(e){ $('#scanList').textContent='✗ '+e.message; }
+  finally{ $('#scanBtn').disabled=false; }
+}
+function openSave(d){
+  const def = (d.registered===false && d.mac_id)?d.mac_id:'';
+  const pw = prompt(`Password for ${d.name||d.address}\n(the password you set in the Cummins app`+
+                    (def?`, or leave as the prefilled macId since this unit has no password set)`:')'), def);
+  if(pw===null) return;
+  api('POST','/api/devices',{address:d.address,name:d.name||'Gateway',password:pw})
+    .then(()=>{ toast('saved'); refreshSaved(); return connectTo(d.address); });
+}
+async function setAutoconnect(on){
+  try{ await api('POST','/api/autoconnect',{enabled:on}); toast(on?'auto-connect on':'auto-connect off'); }
+  catch(e){ toast('✗ '+e.message); }
+}
+async function refreshSaved(){
+  try{
+    const st = await api('GET','/api/state');
+    $('#autoconn').checked = !!st.autoconnect;
+    const lastName = (load_devices_cache[st.last]||{}).name;
+    $('#lastDev').textContent = st.last ? ('Last: '+(lastName||st.last)) : 'No device connected yet.';
+  }catch(e){}
+  try{
+    const list = await api('GET','/api/devices');
+    load_devices_cache = Object.fromEntries(list.map(d=>[d.address,d]));
+    $('#savedList').innerHTML = list.length? list.map(d=>
+      `<div class="dev"><div class="meta"><b>${d.name||'(unnamed)'}</b><br><small>${d.address}`+
+      `${d.has_password?'':' · ⚠ no password'}</small></div>
+       <button class="act" onclick="connectTo('${d.address}')">Connect</button>
+       <button class="act ghost" onclick="pairDev('${d.address}')">Pair</button>
+       <button class="act ghost" onclick="delDev('${d.address}')">✕</button></div>`).join('')
+      : '<span class="muted">none</span>';
+  }catch(e){}
+}
+async function connectTo(addr){
+  toast('connecting…');
+  try{ await api('POST','/api/connect',{address:addr}); toast('connected ✓'); }
+  catch(e){ toast('✗ '+e.message); }
+}
+async function pairDev(addr){
+  toast('pairing…');
+  try{ const r=await api('POST','/api/pair',{address:addr}); toast(r.note||'pair attempted'); }
+  catch(e){ toast('✗ '+e.message); }
+}
+async function delDev(addr){ await api('DELETE','/api/devices/'+addr); refreshSaved(); }
+$('#discBtn').onclick=async()=>{ await api('POST','/api/disconnect'); toast('disconnected'); };
+
+// auto params
+async function loadAuto(){
+  try{
+    const a = await api('GET','/api/auto');
+    $('#a_batt').checked=a.battery_sense_enabled; $('#a_ac').checked=a.ac_sense_enabled;
+    $('#a_startv').value=a.start_volts; $('#a_stopv').value=a.stop_volts;
+    $('#a_stopmin').value=Math.round(a.stop_time_sec/60); $('#a_startsec').value=a.start_time_sec;
+    a.zones.forEach((z,i)=>{ $('#z'+i+'name').value=z.name||''; $('#z'+i+'temp').value=z.temp; });
+  }catch(e){ toast('✗ '+e.message); }
+}
+async function saveAuto(){
+  const zones=[0,1,2].map(i=>({name:$('#z'+i+'name').value||'', temp:parseInt($('#z'+i+'temp').value||'0')}));
+  const body={ ac_sense_enabled:$('#a_ac').checked, battery_sense_enabled:$('#a_batt').checked,
+    start_volts:parseFloat($('#a_startv').value||'0'), stop_volts:parseFloat($('#a_stopv').value||'0'),
+    start_time_sec:parseInt($('#a_startsec').value||'0'), stop_time_sec:parseInt($('#a_stopmin').value||'0')*60, zones };
+  try{ await api('POST','/api/auto',body); toast('auto settings saved ✓'); }catch(e){ toast('✗ '+e.message); }
+}
+// quiet
+function hhmm(sec){ sec%=86400; const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60);
+  return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
+function toSec(v){ const [h,m]=(v||'0:0').split(':').map(Number); return h*3600+m*60; }
+async function loadQuiet(){
+  try{ const q=await api('GET','/api/quiet');
+    $('#q_en').checked=q.enabled; $('#q_day').value=q.day;
+    $('#q_start').value=hhmm(q.start_sec); $('#q_stop').value=hhmm(q.stop_sec);
+  }catch(e){ toast('✗ '+e.message); }
+}
+async function saveQuiet(){
+  const body={ enabled:$('#q_en').checked, day:parseInt($('#q_day').value),
+    start_sec:toSec($('#q_start').value), stop_sec:toSec($('#q_stop').value) };
+  try{ await api('POST','/api/quiet',body); toast('quiet time saved ✓'); }catch(e){ toast('✗ '+e.message); }
+}
+
+// schedule
+async function refreshSchedules(){
+  // populate device dropdown from saved devices
+  try{
+    const devs = await api('GET','/api/devices');
+    $('#s_device').innerHTML = devs.length
+      ? devs.map(d=>`<option value="${d.address}">${d.name||d.address}</option>`).join('')
+      : '<option value="">(save a device first)</option>';
+  }catch(e){}
+  try{
+    const r = await api('GET','/api/schedules');
+    $('#schedList').innerHTML = r.schedules.length ? r.schedules.map(s=>{
+      const days = s.days.map(i=>DAYS[i]).join(' ');
+      return `<div class="dev"><div class="meta">
+        <b>${s.action==='start'?'▶ Start':'■ Stop'}</b> at <b>${s.time}</b><br>
+        <small>${days||'no days'} · ${s.device}</small></div>
+        <label class="pill" style="color:var(--fg)"><input type="checkbox" ${s.enabled?'checked':''}
+           onchange='toggleSchedule(${JSON.stringify(s)},this.checked)' style="width:14px;height:14px"> on</label>
+        <button class="act ghost" onclick="delSchedule('${s.id}')">✕</button></div>`;
+    }).join('') : '<span class="muted">none</span>';
+    $('#schedLog').textContent = (r.log&&r.log.length)? r.log.join('\n') : '—';
+  }catch(e){ $('#schedList').textContent='✗ '+e.message; }
+}
+async function addSchedule(){
+  const days=[...document.querySelectorAll('.s_day:checked')].map(c=>parseInt(c.value));
+  const dev=$('#s_device').value, time=$('#s_time').value;
+  if(!dev){ toast('save a device first'); return; }
+  if(!time){ toast('pick a time'); return; }
+  if(!days.length){ toast('pick at least one day'); return; }
+  try{ await api('POST','/api/schedules',{action:$('#s_action').value,device:dev,time,days,enabled:true});
+       toast('schedule added ✓'); refreshSchedules(); }catch(e){ toast('✗ '+e.message); }
+}
+async function toggleSchedule(s,on){ s.enabled=on; await api('POST','/api/schedules',s); refreshSchedules(); }
+async function delSchedule(id){ await api('DELETE','/api/schedules/'+id); refreshSchedules(); }
+
+buildMetrics(); refreshSaved(); poll(); setInterval(poll, 2000);
+</script>
+</body>
+</html>

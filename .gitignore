@@ -1,0 +1,21 @@
+# secrets & local runtime state (NEVER commit)
+# devices.json holds the generator password in plaintext
+devices.json
+state.json
+schedules.json
+*.local
+
+# proprietary: do NOT redistribute Cummins/Saucon's app or its decompiled source
+*.apk
+jadx_out/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# macOS / build
+.DS_Store
+build/
+dist/
+*.egg-info/

@@ -1,0 +1,16 @@
+[Unit]
+Description=Cummins EC-AGS+ generator web dashboard
+After=bluetooth.target network.target
+Wants=bluetooth.target
+
+[Service]
+# Adjust User and paths to match your Pi install.
+User=pi
+WorkingDirectory=/home/pi/RV_Generator
+ExecStart=/home/pi/RV_Generator/.venv/bin/python /home/pi/RV_Generator/server.py
+Environment=AGS_PORT=8722
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
