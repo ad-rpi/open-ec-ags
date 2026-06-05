@@ -174,22 +174,22 @@
     </div>
     <div class="card">
       <h3 style="margin-top:0">Cold start (heater) — this machine</h3>
-      <p class="muted" style="margin-top:0">Starts the generator when it gets <b>cold</b>, so the oil heater
-        runs off the genset instead of draining the EcoFlow. (The genset's own temp feature only starts
-        when it's <i>hot</i>, for A/C.) Runs on this machine, independent of the genset.</p>
+      <p class="muted" style="margin-top:0">Starts the generator when it gets <b>cold</b> so a heater can
+        run off generator power instead of draining the batteries. Runs on this machine — needs the
+        server up.</p>
       <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="t_en"></div>
       <div class="grid">
         <div><label>Temp source</label><select id="t_src">
           <option value="genset">Genset remote sensor</option>
           <option value="external">External (fed via API)</option></select></div>
         <div><label>Min run time (minutes)</label><input type="number" id="t_minrun"></div>
-        <div><label>Start when below</label><input type="number" step="0.1" id="t_below"></div>
-        <div><label>Stop when above</label><input type="number" step="0.1" id="t_above"></div>
+        <div><label>Start below (°)</label><input type="number" step="0.1" id="t_below"></div>
+        <div><label>Stop above (°)</label><input type="number" step="0.1" id="t_above"></div>
       </div>
       <div class="muted" style="margin-top:8px">Current temp: <b id="t_cur">—</b> &nbsp;·&nbsp;
         rule active: <b id="t_active">—</b><br>
-        Set thresholds in the same units the current reading shows. Needs a gap (stop &gt; start) so it
-        doesn't flap. Freeze protection ignores quiet hours by design.</div>
+        Same temperature units as the A/C zones above. Needs a gap (stop &gt; start) so it doesn't
+        flap. Freeze protection ignores quiet hours by design.</div>
       <div class="btns" style="margin-top:14px">
         <button class="act" onclick="saveTempCtl()">Save</button>
         <button class="act ghost" onclick="loadTempCtl()">Reload</button>
