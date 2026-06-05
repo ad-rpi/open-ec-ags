@@ -31,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEVICES_PATH = os.path.join(HERE, "devices.json")
 SCHEDULES_PATH = os.path.join(HERE, "schedules.json")
 STATE_PATH = os.path.join(HERE, "state.json")    # remembers last device + autoconnect pref
+TEMPCTL_PATH = os.path.join(HERE, "tempctl.json")  # cold-start (heater) temperature rule
 
 # ----------------------------------------------------------------------------- devices store
 def load_devices():
@@ -364,6 +365,7 @@ async def _on_startup():
     mgr.autoconnect = load_state().get("autoconnect", True)
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(autoconnect_loop())
+    asyncio.create_task(temp_control_loop())
 
 class AutoConnectReq(BaseModel):
     enabled: bool
@@ -400,6 +402,115 @@ async def api_sched_save(s: Schedule):
 async def api_sched_delete(sid: str):
     save_schedules([x for x in load_schedules() if x["id"] != sid])
     _sched_fired.pop(sid, None)
+    return {"ok": True}
+
+# ----------------------------------------------------------------------------- temperature rule
+# Start the genset when it gets COLD (the genset's own temp feature only starts when HOT, for A/C).
+# Reads temp from the genset's remote-temp telemetry OR an externally POSTed reading, so the oil
+# heater runs off generator power instead of draining the EcoFlow. Hysteresis + min-run-time; only
+# stops a genset THIS rule started. Freeze protection deliberately ignores quiet hours.
+TEMPCTL_DEFAULT = {"enabled": False, "source": "genset",
+                   "start_below": 5.0, "stop_above": 12.0, "min_run_min": 20}
+
+def load_tempctl():
+    try:
+        with open(TEMPCTL_PATH) as f:
+            return {**TEMPCTL_DEFAULT, **json.load(f)}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(TEMPCTL_DEFAULT)
+
+def save_tempctl(c):
+    _atomic_write(TEMPCTL_PATH, c)
+
+class TempRule(BaseModel):
+    enabled: bool = False
+    source: str = "genset"          # "genset" (remote-temp telemetry) | "external" (POST /api/temp)
+    start_below: float              # start genset when temp <= this
+    stop_above: float               # stop when temp >= this (must be > start_below)
+    min_run_min: int = 20           # don't stop until it's run this long (anti short-cycle)
+
+class ExternalTemp(BaseModel):
+    temp: float
+
+_temp_log = []
+_temp_started = False               # did THIS rule start the genset? (only-stop-what-we-started)
+_temp_start_ts = None
+_external_temp = None
+_external_temp_ts = None
+
+def _log_temp(msg):
+    _temp_log.append(f"{datetime.now().strftime('%Y-%m-%dT%H:%M')}  {msg}")
+    del _temp_log[:-50]
+
+def _current_temp():
+    """Latest temperature from the configured source, or None if unavailable/stale."""
+    cfg = load_tempctl()
+    if cfg.get("source") == "external":
+        if (_external_temp is not None and _external_temp_ts
+                and (datetime.now() - _external_temp_ts).total_seconds() < 600):
+            return _external_temp
+        return None
+    if mgr.ags:
+        return (mgr.ags.telemetry.get("temp") or {}).get("remote_temp")
+    return None
+
+async def temp_control_loop():
+    global _temp_started, _temp_start_ts
+    while True:
+        try:
+            cfg = load_tempctl()
+            if cfg.get("enabled") and mgr.state == "connected":
+                temp = _current_temp()
+                state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
+                running = state in ("Running", "Cranking")
+                if temp is not None:
+                    sb, sa = cfg["start_below"], cfg["stop_above"]
+                    minrun = cfg.get("min_run_min", 20) * 60
+                    if temp <= sb and not running and not _temp_started:
+                        try:
+                            async with mgr.lock:
+                                await mgr.require().send_rpc(ag.RPC_START_GEN)
+                            _temp_started, _temp_start_ts = True, datetime.now()
+                            _log_temp(f"START — temp {temp} ≤ {sb}")
+                        except Exception as ex:
+                            _log_temp(f"start FAILED: {ex}")
+                    elif temp >= sa and _temp_started:
+                        elapsed = (datetime.now() - _temp_start_ts).total_seconds() if _temp_start_ts else 1e9
+                        if elapsed >= minrun:
+                            try:
+                                async with mgr.lock:
+                                    await mgr.require().send_rpc(ag.RPC_STOP_GEN)
+                                _temp_started, _temp_start_ts = False, None
+                                _log_temp(f"STOP — temp {temp} ≥ {sa}")
+                            except Exception as ex:
+                                _log_temp(f"stop FAILED: {ex}")
+                # we think we started it, but it's not running → someone else stopped it; let go
+                if (_temp_started and not running and _temp_start_ts
+                        and (datetime.now() - _temp_start_ts).total_seconds() > 90):
+                    _temp_started, _temp_start_ts = False, None
+                    _log_temp("released (genset stopped externally)")
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+
+@app.post("/api/temp")
+async def api_temp(t: ExternalTemp):
+    """Feed an external temperature reading (e.g. from a separate BLE sensor) for source=external."""
+    global _external_temp, _external_temp_ts
+    _external_temp, _external_temp_ts = t.temp, datetime.now()
+    return {"ok": True}
+
+@app.get("/api/tempctl")
+async def api_tempctl_get():
+    return {**load_tempctl(), "current_temp": _current_temp(),
+            "running": ((mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None),
+            "rule_active": _temp_started, "log": _temp_log[-15:]}
+
+@app.post("/api/tempctl")
+async def api_tempctl_set(r: TempRule):
+    if r.stop_above <= r.start_below:
+        raise HTTPException(400, "stop_above must be greater than start_below (need a hysteresis gap)")
+    save_tempctl(r.model_dump())
     return {"ok": True}
 
 @app.get("/", response_class=HTMLResponse)

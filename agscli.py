@@ -184,8 +184,19 @@ def decode_mondata(b):
             "fuel_pump": (flags & 1) if not (flags >> 4) & 1 else None,
             "starter": ((flags >> 1) & 1) if not (flags >> 5) & 1 else None}
 
-DECODERS = {"status": decode_status, "readings": decode_readings,
-            "dcvolts": decode_dcvolts, "mondata": decode_mondata}
+def decode_temp(b):
+    # GensetTempData (0x1712): a paired remote temp sensor. remote_temp is what the cold-start rule
+    # can read. Units are whatever the genset reports (value ÷100) — calibrate thresholds to it.
+    if len(b) < 17:
+        return {}
+    rt, rb = _u16(b, 9), _u16(b, 11)
+    return {"nickname": bytes(b[0:9]).decode("latin1", "replace").strip("\x00 ").strip(),
+            "remote_temp": (rt / 100.0) if rt is not None else None,
+            "remote_battery": (rb / 1000.0) if rb is not None else None,
+            "last_reading": struct.unpack_from("<I", b, 13)[0]}
+
+DECODERS = {"status": decode_status, "readings": decode_readings, "dcvolts": decode_dcvolts,
+            "mondata": decode_mondata, "temp": decode_temp}
 
 # ================================================================================
 # BLE client wrapper
