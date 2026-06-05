@@ -61,10 +61,10 @@
 </header>
 <nav>
   <button data-tab="control" class="active">Control</button>
-  <button data-tab="auto">Auto Start/Stop</button>
+  <button data-tab="auto">Battery Start/Stop</button>
+  <button data-tab="temp">Temperature Startup</button>
   <button data-tab="quiet">Quiet Time</button>
   <button data-tab="schedule">Schedule</button>
-  <button data-tab="tempctl">Cold Start</button>
   <button data-tab="history">History</button>
   <button data-tab="devices">Devices</button>
   <button data-tab="settings">⚙</button>
@@ -101,16 +101,12 @@
         <div><label>Start delay (seconds)</label><input type="number" id="a_startsec"></div>
       </div>
     </div>
-    <div class="card">
-      <h3 style="margin-top:0">Temperature (A/C) auto start</h3>
-      <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="a_ac"></div>
-      <div id="zones"></div>
-    </div>
-    <div class="btns">
+    <div class="btns" style="margin-top:14px">
       <button class="act" onclick="saveAuto()">Save</button>
       <button class="act ghost" onclick="loadAuto()">Reload</button>
     </div>
-    <p class="muted">Auto mode must also be turned <b>ON</b> (Control tab) for these to take effect.</p>
+    <p class="muted">Genset feature — works even when this dashboard is off. Turn Auto mode <b>ON</b>
+      (Control tab) for it to act.</p>
   </section>
 
   <!-- QUIET -->
@@ -160,10 +156,24 @@
     </div>
   </section>
 
-  <!-- COLD START (temperature rule) -->
-  <section class="tab" id="tab-tempctl">
+  <!-- TEMPERATURE STARTUP (hot = genset A/C feature; cold = software heater rule) -->
+  <section class="tab" id="tab-temp">
+    <p class="muted" style="margin:0 0 4px">Two separate mechanisms: <b>Hot start (A/C)</b> runs on the
+      genset itself (works even when this dashboard is off). <b>Cold start (heater)</b> runs on this
+      machine (needs the server up).</p>
     <div class="card">
-      <h3 style="margin-top:0">Cold-start (heater) rule</h3>
+      <h3 style="margin-top:0">Hot start (A/C) — genset</h3>
+      <p class="muted" style="margin-top:0">Starts when a zone goes <b>above</b> its setpoint, to run the
+        A/C. Genset feature; Auto mode must be <b>ON</b> (Control tab).</p>
+      <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="a_ac"></div>
+      <div id="zones"></div>
+      <div class="btns" style="margin-top:14px">
+        <button class="act" onclick="saveAuto()">Save</button>
+        <button class="act ghost" onclick="loadAuto()">Reload</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Cold start (heater) — this machine</h3>
       <p class="muted" style="margin-top:0">Starts the generator when it gets <b>cold</b>, so the oil heater
         runs off the genset instead of draining the EcoFlow. (The genset's own temp feature only starts
         when it's <i>hot</i>, for A/C.) Runs on this machine, independent of the genset.</p>
@@ -256,7 +266,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==='devices') refreshSaved();
   if(b.dataset.tab==='schedule') refreshSchedules();
   if(b.dataset.tab==='history' && connected) loadHistory();
-  if(b.dataset.tab==='tempctl') loadTempCtl();
+  if(b.dataset.tab==='temp'){ if(connected) loadAuto(); loadTempCtl(); }
   if(b.dataset.tab==='settings') renderSettings();
 });
 
