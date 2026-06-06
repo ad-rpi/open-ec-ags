@@ -476,9 +476,9 @@ async function loadHistory(){
     $('#eventList').innerHTML = (h.events&&h.events.length)
       ? h.events.map(e=>`<div class="row"><span class="k">${new Date(e.time*1000).toLocaleString()}</span>
           <span class="v">${e.code}${e.name?(' · '+e.name):''}</span></div>`).join('')
-      : '<span class="muted">No stored fault/event records. Either nothing has faulted (good), or this '
-        +'unit doesn\'t return a history log — like the engine-internal fields, some EC-AGS+ hardware '
-        +'reports none.</span>';
+      : '<span class="muted">No stored fault/event records — the genset returned an empty fault log. '
+        +'It keeps a small rolling buffer of recent events, so this just means nothing has faulted '
+        +'recently (older events may have aged out).</span>';
   }catch(e){
     $('#activeFault').innerHTML='<span style="color:var(--amber)">⚠ couldn\'t read</span>';
     $('#eventList').textContent='✗ '+e.message;

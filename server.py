@@ -276,8 +276,15 @@ async def api_auto_set(p: AutoParams):
     return {"ok": True}
 
 @app.get("/api/history")
-async def api_history():
+async def api_history(raw: bool = False):
     ags = mgr.require()
+    if raw:   # diagnostic: inspect the unprocessed FAULTCODEALL response. Empty blob => opcode returns
+              # nothing on this unit; all-zero blob => supported but no retained events. (protocol docs)
+        params = await mgr.op(lambda a: a.send_rpc(
+            ag.RPC_FAULTCODEALL, expect=ag.RPC_FAULTCODEALL, timeout=12.0))
+        blob = next((v for t, v in params if t == "B"), b"")
+        return {"param_types": "".join(t for t, _ in params), "raw_len": len(blob),
+                "all_zero": (all(x == 0 for x in blob) if blob else None), "raw_hex": blob.hex()}
     events = await mgr.op(lambda a: a.get_fault_history())
     for e in events:                      # annotate each event with the fault name
         e["name"] = faultcodes.lookup(e["code"])["name"]
