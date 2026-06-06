@@ -32,6 +32,7 @@ DEVICES_PATH = os.path.join(HERE, "devices.json")
 SCHEDULES_PATH = os.path.join(HERE, "schedules.json")
 STATE_PATH = os.path.join(HERE, "state.json")    # remembers last device + autoconnect pref
 TEMPCTL_PATH = os.path.join(HERE, "tempctl.json")  # cold-start (heater) temperature rule
+SOCCTL_PATH = os.path.join(HERE, "socctl.json")    # low-house-SOC auto start/stop rule
 
 # ----------------------------------------------------------------------------- devices store
 def load_devices():
@@ -366,6 +367,7 @@ async def _on_startup():
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(autoconnect_loop())
     asyncio.create_task(temp_control_loop())
+    asyncio.create_task(soc_control_loop())
 
 class AutoConnectReq(BaseModel):
     enabled: bool
@@ -511,6 +513,98 @@ async def api_tempctl_set(r: TempRule):
     if r.stop_above <= r.start_below:
         raise HTTPException(400, "stop_above must be greater than start_below (need a hysteresis gap)")
     save_tempctl(r.model_dump())
+    return {"ok": True}
+
+# ----------------------------------------------------------------------------- state-of-charge rule
+# Start the genset when the HOUSE battery's state-of-charge drops too low, stop once it's recharged.
+# Keys off the genset's OWN reported house SOC (soc_house_%, confirmed-working telemetry) — unlike the
+# built-in battery auto-start, which reads a DC-voltage sense lead that isn't wired on this rig. Same
+# pattern as the cold-start rule: hysteresis + min-run-time, and it only stops a genset THIS rule
+# started. Like freeze protection it ignores quiet hours — protecting the bank from deep discharge wins.
+# NOTE: on the tested unit soc_house_% is a coarse 4-level gauge (~0/33/66/100 = empty/⅓/⅔/full), so
+# thresholds must straddle those buckets — defaults start at ⅓ (≤33) and stop at ⅔ (≥66).
+SOCCTL_DEFAULT = {"enabled": False, "start_below": 33, "stop_above": 66, "min_run_min": 30}
+
+def load_socctl():
+    try:
+        with open(SOCCTL_PATH) as f:
+            return {**SOCCTL_DEFAULT, **json.load(f)}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(SOCCTL_DEFAULT)
+
+def save_socctl(c):
+    _atomic_write(SOCCTL_PATH, c)
+
+class SocRule(BaseModel):
+    enabled: bool = False
+    start_below: int                # start genset when house SOC <= this (%)
+    stop_above: int                 # stop when house SOC >= this (must be > start_below)
+    min_run_min: int = 30           # don't stop until it's run this long (anti short-cycle)
+
+_soc_log = []
+_soc_started = False                # did THIS rule start the genset? (only-stop-what-we-started)
+_soc_start_ts = None
+
+def _log_soc(msg):
+    _soc_log.append(f"{datetime.now().strftime('%Y-%m-%dT%H:%M')}  {msg}")
+    del _soc_log[:-50]
+
+def _current_soc():
+    """Latest house-battery SOC (%) from the genset, or None if unavailable."""
+    if mgr.ags:
+        return (mgr.ags.telemetry.get("status") or {}).get("soc_house_%")
+    return None
+
+async def soc_control_loop():
+    global _soc_started, _soc_start_ts
+    while True:
+        try:
+            cfg = load_socctl()
+            if cfg.get("enabled") and mgr.state == "connected":
+                soc = _current_soc()
+                state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
+                running = state in ("Running", "Cranking")
+                if soc is not None:
+                    sb, sa = cfg["start_below"], cfg["stop_above"]
+                    minrun = cfg.get("min_run_min", 30) * 60
+                    if soc <= sb and not running and not _soc_started:
+                        try:
+                            async with mgr.lock:
+                                await mgr.require().send_rpc(ag.RPC_START_GEN)
+                            _soc_started, _soc_start_ts = True, datetime.now()
+                            _log_soc(f"START — house SOC {soc}% ≤ {sb}%")
+                        except Exception as ex:
+                            _log_soc(f"start FAILED: {ex}")
+                    elif soc >= sa and _soc_started:
+                        elapsed = (datetime.now() - _soc_start_ts).total_seconds() if _soc_start_ts else 1e9
+                        if elapsed >= minrun:
+                            try:
+                                async with mgr.lock:
+                                    await mgr.require().send_rpc(ag.RPC_STOP_GEN)
+                                _soc_started, _soc_start_ts = False, None
+                                _log_soc(f"STOP — house SOC {soc}% ≥ {sa}%")
+                            except Exception as ex:
+                                _log_soc(f"stop FAILED: {ex}")
+                # we think we started it, but it's not running → someone else stopped it; let go
+                if (_soc_started and not running and _soc_start_ts
+                        and (datetime.now() - _soc_start_ts).total_seconds() > 90):
+                    _soc_started, _soc_start_ts = False, None
+                    _log_soc("released (genset stopped externally)")
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+
+@app.get("/api/socctl")
+async def api_socctl_get():
+    return {**load_socctl(), "current_soc": _current_soc(),
+            "running": ((mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None),
+            "rule_active": _soc_started, "log": _soc_log[-15:]}
+
+@app.post("/api/socctl")
+async def api_socctl_set(r: SocRule):
+    if r.stop_above <= r.start_below:
+        raise HTTPException(400, "stop_above must be greater than start_below (need a hysteresis gap)")
+    save_socctl(r.model_dump())
     return {"ok": True}
 
 @app.get("/", response_class=HTMLResponse)

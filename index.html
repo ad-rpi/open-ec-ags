@@ -92,7 +92,36 @@
   <!-- AUTO -->
   <section class="tab" id="tab-auto">
     <div class="card">
-      <h3 style="margin-top:0">Battery voltage auto start/stop</h3>
+      <h3 style="margin-top:0">State-of-charge auto start/stop (this machine)</h3>
+      <p class="muted" style="margin-top:0">Starts the generator when the <b>house battery SOC</b> drops
+        too low and stops it once recharged — using the SOC the genset actually reports. Runs on this
+        machine (needs the server up). Ignores quiet hours by design (protecting the bank comes first).</p>
+      <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="c_en"></div>
+      <div class="grid">
+        <div><label>Start below (% SOC)</label><input type="number" id="c_below"></div>
+        <div><label>Stop above (% SOC)</label><input type="number" id="c_above"></div>
+        <div><label>Min run time (minutes)</label><input type="number" id="c_minrun"></div>
+        <div></div>
+      </div>
+      <div class="muted" style="margin-top:8px">House SOC now: <b id="c_cur">—</b> &nbsp;·&nbsp;
+        rule active: <b id="c_active">—</b><br>
+        This unit reports SOC as a coarse 4-level gauge — <b>~0 / 33 / 66 / 100</b> (empty / ⅓ / ⅔ / full),
+        so thresholds must straddle those steps. Defaults start at ⅓ (≤33) and stop at ⅔ (≥66); set stop
+        to 100 for a full charge. Needs a gap (stop &gt; start) so it doesn't flap.</div>
+      <div class="btns" style="margin-top:14px">
+        <button class="act" onclick="saveSocCtl()">Save</button>
+        <button class="act ghost" onclick="loadSocCtl()">Reload</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Recent activity</h3>
+      <pre id="c_log" class="muted" style="white-space:pre-wrap;margin:0">—</pre>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Battery voltage auto start/stop (genset)</h3>
+      <p class="muted" style="margin-top:0">The genset's built-in rule — works even when this dashboard
+        is off, but reads a DC-voltage sense lead (not wired on this rig, so it reads a ghost voltage).
+        Prefer the SOC rule above. Turn Auto mode <b>ON</b> (Control tab) for this to act.</p>
       <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="a_batt"></div>
       <div class="grid">
         <div><label>Start when below (V)</label><input type="number" step="0.1" id="a_startv"></div>
@@ -100,13 +129,11 @@
         <div><label>Min run time (minutes)</label><input type="number" id="a_stopmin"></div>
         <div><label>Start delay (seconds)</label><input type="number" id="a_startsec"></div>
       </div>
+      <div class="btns" style="margin-top:14px">
+        <button class="act" onclick="saveAuto()">Save</button>
+        <button class="act ghost" onclick="loadAuto()">Reload</button>
+      </div>
     </div>
-    <div class="btns" style="margin-top:14px">
-      <button class="act" onclick="saveAuto()">Save</button>
-      <button class="act ghost" onclick="loadAuto()">Reload</button>
-    </div>
-    <p class="muted">Genset feature — works even when this dashboard is off. Turn Auto mode <b>ON</b>
-      (Control tab) for it to act.</p>
   </section>
 
   <!-- QUIET -->
@@ -261,7 +288,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
   b.classList.add('active'); $('#tab-'+b.dataset.tab).classList.add('active');
-  if(b.dataset.tab==='auto' && connected) loadAuto();
+  if(b.dataset.tab==='auto'){ if(connected) loadAuto(); loadSocCtl(); }
   if(b.dataset.tab==='quiet' && connected) loadQuiet();
   if(b.dataset.tab==='devices') refreshSaved();
   if(b.dataset.tab==='schedule') refreshSchedules();
@@ -288,6 +315,26 @@ async function saveTempCtl(){
     start_below:parseFloat($('#t_below').value), stop_above:parseFloat($('#t_above').value),
     min_run_min:parseInt($('#t_minrun').value||'20') };
   try{ await api('POST','/api/tempctl',body); toast('cold-start rule saved ✓'); loadTempCtl(); }
+  catch(e){ toast('✗ '+e.message); }
+}
+
+async function loadSocCtl(){
+  try{
+    const c = await api('GET','/api/socctl');
+    $('#c_en').checked = !!c.enabled;
+    $('#c_below').value = c.start_below;
+    $('#c_above').value = c.stop_above;
+    $('#c_minrun').value = c.min_run_min;
+    $('#c_cur').textContent = (c.current_soc==null ? '—' : c.current_soc+'%');
+    $('#c_active').textContent = c.rule_active ? 'yes — genset started by rule' : 'no';
+    $('#c_log').textContent = (c.log && c.log.length) ? c.log.join('\n') : '—';
+  }catch(e){ toast('✗ '+e.message); }
+}
+async function saveSocCtl(){
+  const body={ enabled:$('#c_en').checked,
+    start_below:parseInt($('#c_below').value), stop_above:parseInt($('#c_above').value),
+    min_run_min:parseInt($('#c_minrun').value||'30') };
+  try{ await api('POST','/api/socctl',body); toast('SOC rule saved ✓'); loadSocCtl(); }
   catch(e){ toast('✗ '+e.message); }
 }
 
@@ -340,7 +387,7 @@ const METRICS = [
   {k:'start_v_s', g:'Batteries', label:'Start V (short avg)', src:'dcvolts', f:'engine_v_short',u:'V', def:false},
   {k:'start_v_l', g:'Batteries', label:'Start V (long avg)',  src:'dcvolts', f:'engine_v_long', u:'V', def:false},
   {k:'fault',     g:'Status', label:'Fault code',          src:'status', f:'fault_code',   fmt:'fault', def:true},
-  {k:'run',       g:'Status', label:'Run time (this start)',src:'status', f:'run_seconds',  fmt:'run',   def:true},
+  {k:'run',       g:'Status', label:'Run time (this start)',src:'status', f:'last_started', fmt:'run',   def:true},
   {k:'laststart', g:'Status', label:'Last started',        src:'status', f:'last_started', fmt:'date',  def:false},
   {k:'quiet',     g:'Status', label:'Quiet time active',   src:'status', f:'quiet_time',   fmt:'bool',  def:false},
   // --- UNTESTED: reported 0xFF / "not available" on tested hardware; decode unverified ---
@@ -363,7 +410,17 @@ function loadVisible(){
   const v={}; METRICS.forEach(m=> v[m.k] = (m.k in saved)? !!saved[m.k] : m.def); return v;
 }
 function saveVisible(){ localStorage.setItem('ags_visible', JSON.stringify(visible)); }
-function metricVal(t,m){ const v=(t[m.src]||{})[m.f]; return (FV[m.fmt]||FV.raw)(v,m.u); }
+function metricVal(t,m){
+  // Run time for THIS start = now − last_started, shown only while the engine is turning. The genset's
+  // offset-10 counter (uptime_seconds) is a free-running controller clock — it never resets on start
+  // and ticks while stopped — so we never use it here. last_started is reliable and the genset clock
+  // tracks this machine's clock, so the subtraction is valid; guard against skew with a >=0 check.
+  if(m.k==='run'){ const s=t.status||{}; const running=s.state==='Running'||s.state==='Cranking';
+    if(!running || !s.last_started) return '—';
+    const sec = Math.floor(Date.now()/1000) - s.last_started;
+    return sec>=0 ? fmtRun(sec) : '—'; }
+  const v=(t[m.src]||{})[m.f]; return (FV[m.fmt]||FV.raw)(v,m.u);
+}
 function buildMetrics(){
   const shown = METRICS.filter(m=>visible[m.k]);
   $('#metrics').innerHTML = shown.length
@@ -404,7 +461,13 @@ function setAllMetrics(on){ METRICS.forEach(m=>visible[m.k]=on); saveVisible(); 
 function resetMetrics(){ METRICS.forEach(m=>visible[m.k]=m.def); saveVisible(); buildMetrics(); renderSettings(); }
 
 async function loadHistory(){
+  if(!connected){
+    $('#activeFault').textContent='—';
+    $('#eventList').innerHTML='<span class="muted">Connect to a generator first, then Refresh.</span>';
+    return;
+  }
   $('#histBtn').disabled=true;
+  $('#eventList').innerHTML='<span class="muted">Loading…</span>';
   try{
     const h=await api('GET','/api/history'); const af=h.active_fault;
     $('#activeFault').innerHTML = af
@@ -413,8 +476,13 @@ async function loadHistory(){
     $('#eventList').innerHTML = (h.events&&h.events.length)
       ? h.events.map(e=>`<div class="row"><span class="k">${new Date(e.time*1000).toLocaleString()}</span>
           <span class="v">${e.code}${e.name?(' · '+e.name):''}</span></div>`).join('')
-      : '<span class="muted">No events recorded.</span>';
-  }catch(e){ $('#eventList').textContent='✗ '+e.message; }
+      : '<span class="muted">No stored fault/event records. Either nothing has faulted (good), or this '
+        +'unit doesn\'t return a history log — like the engine-internal fields, some EC-AGS+ hardware '
+        +'reports none.</span>';
+  }catch(e){
+    $('#activeFault').innerHTML='<span style="color:var(--amber)">⚠ couldn\'t read</span>';
+    $('#eventList').textContent='✗ '+e.message;
+  }
   finally{ $('#histBtn').disabled=false; }
 }
 

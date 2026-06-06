@@ -151,7 +151,10 @@ def decode_status(b):
         "quiet_time": bool(b[3] & 1),
         "fault_code": b[4],
         "last_started": struct.unpack_from("<I", b, 6)[0],
-        "run_seconds": struct.unpack_from("<I", b, 10)[0],
+        # Offset 10 is a free-running controller counter (≈ controller power-on uptime): it keeps
+        # ticking while the engine is stopped and does NOT reset on a fresh start. It is therefore
+        # NOT per-run engine time — compute run time from `last_started` instead.
+        "uptime_seconds": struct.unpack_from("<I", b, 10)[0],
     }
 
 def decode_readings(b):
@@ -471,7 +474,7 @@ def _print_telemetry(ags, oneline=False):
               f"{r.get('output_vac')}VAC {r.get('output_hz')}Hz load={r.get('load_%')}% "
               f"house={dc.get('house_v', r.get('battery_v'))}V/{s.get('soc_house_%')}% "
               f"start={dc.get('engine_v')}V/{s.get('soc_engine_%')}% "
-              f"fault={s.get('fault_code')} run_s={s.get('run_seconds')}")
+              f"fault={s.get('fault_code')} uptime_s={s.get('uptime_seconds')}")
     else:
         for name, dec in ags.telemetry.items():
             print(f"{name}:")
