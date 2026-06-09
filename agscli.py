@@ -61,10 +61,22 @@ RPC_AUTO_OFF         = 2573
 RPC_RESETFAULT       = 2546
 RPC_FAULTCODEALL     = 2549   # request full fault/event history
 RPC_MODELSERIAL_GET  = 2570
+RPC_GET_SWVER        = 2435   # gateway firmware build date; reply (under PUT) is an 8-char YYYYMMDD
+RPC_PUT_SWVER        = 2436
 RPC_ADV_PARAMS_GET   = 2564   # auto start/stop (charge) params
 RPC_ADV_PARAMS_PUT   = 2565   # also the opcode the genset replies with
 RPC_QUIET_GET        = 2568
 RPC_QUIET_PUT        = 2569
+# Remote temperature sensor (RTS) management. The app gates discovery behind a firmware-date check
+# (>09/02/2020) and has no manual-entry fallback, so on older gateways its "add" UI is dead — but the
+# genset firmware still honors these opcodes, so we drive them directly. (base 2500; see PROTOCOL.md)
+RPC_TEMPSEN_ENA        = 2529   # enable(1)/disable(0) AC-sense; firmware auto-enables on SET_TSENSOR
+RPC_SET_TSENSOR        = 2554   # register a sensor: params ('B' 6-byte MAC), ('S' zone name <=8 chars)
+RPC_GET_TSENSOR        = 2555   # list registered sensors (no params)
+RPC_RESP_TSENSOR       = 2556   # response to GET: one 'B' blob of 15-byte records (6 MAC + 9 name)
+RPC_DEL_TSENSOR        = 2559   # unpair a sensor: param ('B' 6-byte MAC)
+RPC_UNREG_TSENSOR_GET  = 2590   # ask the genset to BLE-scan for nearby UNregistered sensors
+RPC_UNREG_TSENSOR_RESP = 2591   # response: one 'B' blob of 7-byte records (6 MAC + 1 RSSI byte)
 RPC_GET_SEED         = 2427
 RPC_TEMP_SEED        = 2482
 RPC_PASS_PHRASE      = 2433
@@ -375,6 +387,64 @@ class AGS:
                 continue
             events.append({"time": ts, "code": blob[i + 4]})
         return events
+
+    # ---- remote temperature sensors (see PROTOCOL.md) ---------------------------
+    @staticmethod
+    def _mac_to_bytes(mac):
+        """'0A:21:..' / '0A-21-..' / '0A21F490DFC9' -> 6 bytes, in displayed (big-endian) order."""
+        if isinstance(mac, (bytes, bytearray)):
+            b = bytes(mac)
+        else:
+            b = bytes.fromhex(mac.replace(":", "").replace("-", "").replace(" ", ""))
+        if len(b) != 6:
+            raise ValueError(f"MAC must be 6 bytes, got {len(b)} from {mac!r}")
+        return b
+
+    @staticmethod
+    def _mac_to_str(b):
+        return ":".join(f"{x:02X}" for x in b)
+
+    async def scan_temp_sensors(self, timeout=15.0):
+        """Ask the genset to BLE-scan for nearby UNregistered sensors. Returns [{mac, rssi}]."""
+        params = await self.send_rpc(RPC_UNREG_TSENSOR_GET, expect=RPC_UNREG_TSENSOR_RESP, timeout=timeout)
+        blob = next((v for t, v in params if t == "B"), b"")
+        out = []
+        for i in range(0, len(blob) - 6, 7):                  # 7-byte records: 6 MAC + 1 RSSI
+            mac = bytes(blob[i:i + 6])
+            if any(mac):
+                rssi = blob[i + 6]
+                out.append({"mac": self._mac_to_str(mac), "rssi": rssi - 256 if rssi > 127 else rssi})
+        return out
+
+    async def list_temp_sensors(self, timeout=10.0):
+        """Return the genset's registered temp sensors as [{mac, zone}]."""
+        params = await self.send_rpc(RPC_GET_TSENSOR, expect=RPC_RESP_TSENSOR, timeout=timeout)
+        blob = next((v for t, v in params if t == "B"), b"")
+        out = []
+        for i in range(0, len(blob) - 14, 15):                # 15-byte records: 6 MAC + 9 name
+            mac = bytes(blob[i:i + 6])
+            if any(mac):
+                zone = bytes(blob[i + 6:i + 15]).decode("latin1", "replace").strip("\x00 ").strip()
+                out.append({"mac": self._mac_to_str(mac), "zone": zone})
+        return out
+
+    async def add_temp_sensor(self, mac, zone):
+        """Register a temp sensor. `mac` as a hex string or 6 raw bytes; `zone` <=8 chars."""
+        macb = self._mac_to_bytes(mac)
+        await self.send_rpc(RPC_SET_TSENSOR, [("B", macb), ("S", (zone or "")[:8])])
+
+    async def del_temp_sensor(self, mac):
+        """Unpair a temp sensor by MAC (hex string or 6 raw bytes)."""
+        await self.send_rpc(RPC_DEL_TSENSOR, [("B", self._mac_to_bytes(mac))])
+
+    async def get_sw_version(self):
+        """Gateway firmware build date. Returns {'build':'YYYYMMDD','display':'MM/DD/YYYY'}.
+        The app gates the RTS discovery scan on display date > 09/02/2020 (see PROTOCOL.md)."""
+        params = await self.send_rpc(RPC_GET_SWVER, expect=(RPC_PUT_SWVER, RPC_GET_SWVER), timeout=10.0)
+        s = next((v for t, v in params if t == "S"), None)
+        if s and len(s) == 8:
+            return {"build": s, "display": f"{s[4:6]}/{s[6:8]}/{s[0:4]}"}
+        return {"build": s, "display": s}
 
     async def get_quiet(self):
         params = await self.send_rpc(RPC_QUIET_GET,

@@ -37,6 +37,13 @@
      width:100%; background:#0e131a; border:1px solid var(--line); color:var(--fg);
      border-radius:7px; padding:9px; font-size:14px; }
   input[type=checkbox]{ width:18px; height:18px; vertical-align:middle; }
+  .switch{ position:relative; display:inline-block; width:46px; height:26px; }
+  .switch input{ opacity:0; width:0; height:0; }
+  .switch .slider{ position:absolute; inset:0; background:var(--line); border-radius:26px; cursor:pointer; transition:.2s; }
+  .switch .slider:before{ content:""; position:absolute; height:20px; width:20px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.2s; }
+  .switch input:checked + .slider{ background:var(--green); }
+  .switch input:checked + .slider:before{ transform:translateX(20px); }
+  .switch input:disabled + .slider{ opacity:.4; cursor:not-allowed; }
   .dev { display:flex; align-items:center; gap:12px; padding:11px; border:1px solid var(--line);
          border-radius:9px; margin-bottom:8px; }
   .dev .meta { flex:1; } .dev .meta small { color:var(--mut); }
@@ -80,10 +87,13 @@
       <div class="btns" style="justify-content:center;margin-top:14px">
         <button class="act green" onclick="cmd('start')" id="startBtn">Start</button>
         <button class="act red" onclick="cmd('stop')" id="stopBtn">Stop</button>
-        <button class="act ghost" onclick="cmd('auto-on')">Auto ON</button>
-        <button class="act ghost" onclick="cmd('auto-off')">Auto OFF</button>
         <button class="act ghost" onclick="cmd('reset-fault')">Reset Fault</button>
       </div>
+      <label class="row" style="justify-content:center;gap:10px;margin-top:14px;cursor:pointer">
+        <span class="k">Auto mode</span>
+        <span class="switch"><input type="checkbox" id="autoSwitch" onchange="setAutoMode(this.checked)"><span class="slider"></span></span>
+        <span class="muted" id="autoState" style="min-width:30px;text-align:left">—</span>
+      </label>
     </div>
     <div class="card"><div id="metrics"></div></div>
     <p class="muted" id="noConnHint">Connect to a generator on the <b>Devices</b> tab first.</p>
@@ -92,36 +102,38 @@
   <!-- AUTO -->
   <section class="tab" id="tab-auto">
     <div class="card">
-      <h3 style="margin-top:0">State-of-charge auto start/stop (this machine)</h3>
-      <p class="muted" style="margin-top:0">Starts the generator when the <b>house battery SOC</b> drops
-        too low and stops it once recharged — using the SOC the genset actually reports. Runs on this
-        machine (needs the server up). Ignores quiet hours by design (protecting the bank comes first).</p>
-      <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="c_en"></div>
+      <h3 style="margin-top:0">Battery-voltage auto start/stop (this machine)</h3>
+      <p class="muted" style="margin-top:0">Starts the generator when the <b>house battery voltage</b>
+        sags too low and stops it once it's charged back up — using the real house volts the genset now
+        reports (grey sense lead wired to the house bank). Runs on this machine (needs the server up) and
+        is the <b>sole</b> auto-start authority. Ignores quiet hours by design (protecting the bank wins).</p>
+      <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="v_en"></div>
       <div class="grid">
-        <div><label>Start below (% SOC)</label><input type="number" id="c_below"></div>
-        <div><label>Stop above (% SOC)</label><input type="number" id="c_above"></div>
-        <div><label>Min run time (minutes)</label><input type="number" id="c_minrun"></div>
+        <div><label>Start below (V)</label><input type="number" step="0.1" id="v_below"></div>
+        <div><label>Stop above (V)</label><input type="number" step="0.1" id="v_above"></div>
+        <div><label>Min run time (minutes)</label><input type="number" id="v_minrun"></div>
         <div></div>
       </div>
-      <div class="muted" style="margin-top:8px">House SOC now: <b id="c_cur">—</b> &nbsp;·&nbsp;
-        rule active: <b id="c_active">—</b><br>
-        This unit reports SOC as a coarse 4-level gauge — <b>~0 / 33 / 66 / 100</b> (empty / ⅓ / ⅔ / full),
-        so thresholds must straddle those steps. Defaults start at ⅓ (≤33) and stop at ⅔ (≥66); set stop
-        to 100 for a full charge. Needs a gap (stop &gt; start) so it doesn't flap.</div>
+      <div class="muted" style="margin-top:8px">House voltage now: <b id="v_cur">—</b> &nbsp;·&nbsp;
+        rule active: <b id="v_active">—</b><br>
+        Voltage rises fast under charge and can't see tail current, so <b>Stop above</b> is a rough "full"
+        proxy — set it to a voltage your converter actually reaches (watch the live reading) and lean on
+        min run time for real charge duration. Needs a gap (stop &gt; start) so it doesn't flap.</div>
       <div class="btns" style="margin-top:14px">
-        <button class="act" onclick="saveSocCtl()">Save</button>
-        <button class="act ghost" onclick="loadSocCtl()">Reload</button>
+        <button class="act" onclick="saveVoltCtl()">Save</button>
+        <button class="act ghost" onclick="loadVoltCtl()">Reload</button>
       </div>
     </div>
     <div class="card">
       <h3 style="margin-top:0">Recent activity</h3>
-      <pre id="c_log" class="muted" style="white-space:pre-wrap;margin:0">—</pre>
+      <pre id="v_log" class="muted" style="white-space:pre-wrap;margin:0">—</pre>
     </div>
     <div class="card">
-      <h3 style="margin-top:0">Battery voltage auto start/stop (genset)</h3>
-      <p class="muted" style="margin-top:0">The genset's built-in rule — works even when this dashboard
-        is off, but reads a DC-voltage sense lead (not wired on this rig, so it reads a ghost voltage).
-        Prefer the SOC rule above. Turn Auto mode <b>ON</b> (Control tab) for this to act.</p>
+      <h3 style="margin-top:0">Battery voltage auto start/stop (genset built-in)</h3>
+      <p class="muted" style="margin-top:0">The genset's own rule — it works even when this dashboard is
+        off, and now reads real house volts (sense lead is wired). We keep it <b>OFF</b> so our app is the
+        single controller; turning it on would put two controllers on the bank (which short-cycled before).
+        Leave Auto mode <b>OFF</b> (Control tab) unless you deliberately want the genset to run this itself.</p>
       <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="a_batt"></div>
       <div class="grid">
         <div><label>Start when below (V)</label><input type="number" step="0.1" id="a_startv"></div>
@@ -288,7 +300,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
   b.classList.add('active'); $('#tab-'+b.dataset.tab).classList.add('active');
-  if(b.dataset.tab==='auto'){ if(connected) loadAuto(); loadSocCtl(); }
+  if(b.dataset.tab==='auto'){ if(connected) loadAuto(); loadVoltCtl(); }
   if(b.dataset.tab==='quiet' && connected) loadQuiet();
   if(b.dataset.tab==='devices') refreshSaved();
   if(b.dataset.tab==='schedule') refreshSchedules();
@@ -318,23 +330,23 @@ async function saveTempCtl(){
   catch(e){ toast('✗ '+e.message); }
 }
 
-async function loadSocCtl(){
+async function loadVoltCtl(){
   try{
-    const c = await api('GET','/api/socctl');
-    $('#c_en').checked = !!c.enabled;
-    $('#c_below').value = c.start_below;
-    $('#c_above').value = c.stop_above;
-    $('#c_minrun').value = c.min_run_min;
-    $('#c_cur').textContent = (c.current_soc==null ? '—' : c.current_soc+'%');
-    $('#c_active').textContent = c.rule_active ? 'yes — genset started by rule' : 'no';
-    $('#c_log').textContent = (c.log && c.log.length) ? c.log.join('\n') : '—';
+    const c = await api('GET','/api/voltctl');
+    $('#v_en').checked = !!c.enabled;
+    $('#v_below').value = c.start_below;
+    $('#v_above').value = c.stop_above;
+    $('#v_minrun').value = c.min_run_min;
+    $('#v_cur').textContent = (c.current_v==null ? '—' : c.current_v.toFixed(2)+' V');
+    $('#v_active').textContent = c.rule_active ? 'yes — genset started by rule' : 'no';
+    $('#v_log').textContent = (c.log && c.log.length) ? c.log.join('\n') : '—';
   }catch(e){ toast('✗ '+e.message); }
 }
-async function saveSocCtl(){
-  const body={ enabled:$('#c_en').checked,
-    start_below:parseInt($('#c_below').value), stop_above:parseInt($('#c_above').value),
-    min_run_min:parseInt($('#c_minrun').value||'30') };
-  try{ await api('POST','/api/socctl',body); toast('SOC rule saved ✓'); loadSocCtl(); }
+async function saveVoltCtl(){
+  const body={ enabled:$('#v_en').checked,
+    start_below:parseFloat($('#v_below').value), stop_above:parseFloat($('#v_above').value),
+    min_run_min:parseInt($('#v_minrun').value||'45') };
+  try{ await api('POST','/api/voltctl',body); toast('voltage rule saved ✓'); loadVoltCtl(); }
   catch(e){ toast('✗ '+e.message); }
 }
 
@@ -361,7 +373,7 @@ async function poll(){
     $('#errBanner').textContent = s.error?('⚠ '+s.error):'';
     $('#noConnHint').style.display = connected?'none':'block';
     document.querySelectorAll('.act:not(.ghost), #tab-control .act').forEach(b=>{});
-    ['startBtn','stopBtn'].forEach(id=>$('#'+id).disabled=!connected);
+    ['startBtn','stopBtn','autoSwitch'].forEach(id=>$('#'+id).disabled=!connected);
     renderTelemetry(s.telemetry||{});
   }catch(e){ $('#connText').textContent='server error'; }
 }
@@ -434,7 +446,10 @@ function updateMetrics(t){
 function renderTelemetry(t){
   lastTelem=t; const st=t.status||{};
   $('#genState').textContent = st.state || (connected?'…':'—');
-  $('#genSub').textContent = st.auto_mode ? 'Auto mode ON' : (connected?'Manual mode':'');
+  const am = !!st.auto_mode;
+  $('#genSub').textContent = connected ? (am?'Genset auto mode':'Manual mode') : '';
+  $('#autoSwitch').checked = am;                          // live-reflect (catches auto flipping on its own)
+  $('#autoState').textContent = connected ? (am?'ON':'OFF') : '';
   updateMetrics(t);
 }
 function renderSettings(){
@@ -490,6 +505,11 @@ async function cmd(c){
   if(busy) return; busy=true;
   try{ await api('POST','/api/command/'+c); toast(c+' sent'); }
   catch(e){ toast('✗ '+e.message); } finally{ busy=false; }
+}
+async function setAutoMode(on){
+  if(busy) return; busy=true;
+  try{ await api('POST','/api/command/'+(on?'auto-on':'auto-off')); toast('genset auto '+(on?'ON':'OFF')); }
+  catch(e){ toast('✗ '+e.message); $('#autoSwitch').checked=!on; } finally{ busy=false; }
 }
 
 // scan / devices

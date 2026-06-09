@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import uuid
@@ -292,6 +293,38 @@ async def api_history(raw: bool = False):
     active = faultcodes.lookup(active_code) if active_code else None
     return {"active_fault": active, "events": events}
 
+# ----------------------------------------------------------------------------- remote temp sensors
+class AddSensor(BaseModel):
+    mac: str
+    zone: str = ""
+
+@app.get("/api/version")
+async def api_version():
+    return await mgr.op(lambda a: a.get_sw_version())
+
+@app.get("/api/sensors")
+async def api_sensors_list():
+    return {"registered": await mgr.op(lambda a: a.list_temp_sensors())}
+
+@app.get("/api/sensors/scan")
+async def api_sensors_scan(timeout: float = 15.0):
+    """Have the genset BLE-scan for nearby unpaired sensors (the step the app's add flow skips)."""
+    return {"candidates": await mgr.op(lambda a: a.scan_temp_sensors(timeout=timeout))}
+
+@app.post("/api/sensors")
+async def api_sensors_add(s: AddSensor):
+    zone = (s.zone or "").strip()
+    if not zone or len(zone) > 8 or not re.fullmatch(r"[A-Za-z0-9' ]+", zone):
+        raise HTTPException(400, "zone name must be 1-8 chars, letters/digits/space/apostrophe only")
+    await mgr.op(lambda a: a.add_temp_sensor(s.mac, zone))
+    await asyncio.sleep(1.0)                       # let the genset commit before we read it back
+    return {"ok": True, "registered": await mgr.op(lambda a: a.list_temp_sensors())}
+
+@app.delete("/api/sensors/{mac}")
+async def api_sensors_del(mac: str):
+    await mgr.op(lambda a: a.del_temp_sensor(mac))
+    return {"ok": True}
+
 @app.get("/api/quiet")
 async def api_quiet_get():
     return await mgr.op(lambda ags: ags.get_quiet())
@@ -374,7 +407,11 @@ async def _on_startup():
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(autoconnect_loop())
     asyncio.create_task(temp_control_loop())
-    asyncio.create_task(soc_control_loop())
+    # SOC rule retired in favour of the voltage rule below (single battery authority). The loop +
+    # endpoints are kept for the lithium-era revert (flat LFP curve → SOC+shunt beats voltage); re-add
+    # this line and its UI card then. Not registering it means a stale socctl.json can't reactivate it.
+    # asyncio.create_task(soc_control_loop())
+    asyncio.create_task(volt_control_loop())
 
 class AutoConnectReq(BaseModel):
     enabled: bool
@@ -612,6 +649,111 @@ async def api_socctl_set(r: SocRule):
     if r.stop_above <= r.start_below:
         raise HTTPException(400, "stop_above must be greater than start_below (need a hysteresis gap)")
     save_socctl(r.model_dump())
+    return {"ok": True}
+
+# ----------------------------------------------------------------------------- battery-voltage rule
+# Start the genset when the HOUSE battery VOLTAGE sags too low, stop once it's charged back up. With the
+# grey sense lead now wired to the house bank, the genset reports real house volts (decode_dcvolts /
+# char 1710) instead of the old ~0.4V ghost — so voltage is a finer, more honest trigger than the coarse
+# 0/33/66/100 SOC gauge (which read 100% at a resting 12.4V). This runs on the host (needs the server up)
+# and is the SOLE battery auto-start authority: the genset's own battery_sense stays OFF and the SOC rule
+# above is left disabled, so only ONE controller acts on the bank (two of them short-cycled before). Same
+# guards as the other rules: hysteresis + min-run-time, only stops a genset THIS rule started, and ignores
+# quiet hours (protecting the bank from deep discharge wins).
+# CAVEAT: terminal voltage rises fast under charge and can't see tail current, so a voltage-only stop is a
+# rough "full" proxy — set stop_above to a voltage the converter actually reaches, and lean on min-run for
+# real absorption time. (True SOC would want a coulomb-counting shunt; see the lithium-era plan.)
+VOLTCTL_PATH = os.path.join(HERE, "voltctl.json")
+VOLTCTL_DEFAULT = {"enabled": False, "start_below": 12.2, "stop_above": 14.4, "min_run_min": 45}
+
+def load_voltctl():
+    try:
+        with open(VOLTCTL_PATH) as f:
+            return {**VOLTCTL_DEFAULT, **json.load(f)}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(VOLTCTL_DEFAULT)
+
+def save_voltctl(c):
+    _atomic_write(VOLTCTL_PATH, c)
+
+class VoltRule(BaseModel):
+    enabled: bool = False
+    start_below: float              # start genset when house volts <= this (V)
+    stop_above: float               # stop when house volts >= this (must be > start_below)
+    min_run_min: int = 45           # don't stop until it's run this long (anti short-cycle + charge time)
+
+_volt_log = []
+_volt_started = False               # did THIS rule start the genset? (only-stop-what-we-started)
+_volt_start_ts = None
+
+def _log_volt(msg):
+    _volt_log.append(f"{datetime.now().strftime('%Y-%m-%dT%H:%M')}  {msg}")
+    del _volt_log[:-50]
+
+def _house_volts(avg=False):
+    """House-battery voltage (V) from DC-volts telemetry, or None. avg=True returns the genset's smoothed
+    value (long→short avg) for the START decision so a momentary load sag can't false-trigger a run;
+    falls back to the instant reading when no average is reported."""
+    if not mgr.ags:
+        return None
+    dc = mgr.ags.telemetry.get("dcvolts") or {}
+    if avg:
+        for k in ("house_v_long", "house_v_short", "house_v"):
+            if dc.get(k) is not None:
+                return dc[k]
+        return None
+    return dc.get("house_v")
+
+async def volt_control_loop():
+    global _volt_started, _volt_start_ts
+    while True:
+        try:
+            cfg = load_voltctl()
+            if cfg.get("enabled") and mgr.state == "connected":
+                state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
+                running = state in ("Running", "Cranking")
+                v_start = _house_volts(avg=True)   # smoothed — rides through transient load sag
+                v_now = _house_volts()             # instant — responsive to the charge voltage rising
+                sb, sa = cfg["start_below"], cfg["stop_above"]
+                minrun = cfg.get("min_run_min", 45) * 60
+                if v_start is not None and v_start <= sb and not running and not _volt_started:
+                    try:
+                        async with mgr.lock:
+                            await mgr.require().send_rpc(ag.RPC_START_GEN)
+                        _volt_started, _volt_start_ts = True, datetime.now()
+                        _log_volt(f"START — house {v_start:.2f}V ≤ {sb}V")
+                    except Exception as ex:
+                        _log_volt(f"start FAILED: {ex}")
+                elif v_now is not None and v_now >= sa and _volt_started:
+                    elapsed = (datetime.now() - _volt_start_ts).total_seconds() if _volt_start_ts else 1e9
+                    if elapsed >= minrun:
+                        try:
+                            async with mgr.lock:
+                                await mgr.require().send_rpc(ag.RPC_STOP_GEN)
+                            _volt_started, _volt_start_ts = False, None
+                            _log_volt(f"STOP — house {v_now:.2f}V ≥ {sa}V")
+                        except Exception as ex:
+                            _log_volt(f"stop FAILED: {ex}")
+                # we think we started it, but it's not running → someone else stopped it; let go
+                if (_volt_started and not running and _volt_start_ts
+                        and (datetime.now() - _volt_start_ts).total_seconds() > 90):
+                    _volt_started, _volt_start_ts = False, None
+                    _log_volt("released (genset stopped externally)")
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+
+@app.get("/api/voltctl")
+async def api_voltctl_get():
+    return {**load_voltctl(), "current_v": _house_volts(),
+            "running": ((mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None),
+            "rule_active": _volt_started, "log": _volt_log[-15:]}
+
+@app.post("/api/voltctl")
+async def api_voltctl_set(r: VoltRule):
+    if r.stop_above <= r.start_below:
+        raise HTTPException(400, "stop_above must be greater than start_below (need a hysteresis gap)")
+    save_voltctl(r.model_dump())
     return {"ok": True}
 
 @app.get("/", response_class=HTMLResponse)

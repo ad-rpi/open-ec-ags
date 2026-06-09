@@ -7,9 +7,10 @@ tempctl.json
 socctl.json
 *.local
 
-# proprietary: do NOT redistribute Cummins/Saucon's app or its decompiled source
+# proprietary: do NOT redistribute Cummins/Saucon's app, decompiled source, or gateway firmware
 *.apk
 jadx_out/
+firmware/
 
 # python
 .venv/
@@ -21,3 +22,4 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+voltctl.json
