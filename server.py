@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import subprocess
 import uuid
 from datetime import datetime
@@ -23,6 +24,7 @@ from datetime import datetime
 from bleak import BleakClient, BleakScanner
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import agscli as ag
@@ -34,6 +36,7 @@ SCHEDULES_PATH = os.path.join(HERE, "schedules.json")
 STATE_PATH = os.path.join(HERE, "state.json")    # remembers last device + autoconnect pref
 TEMPCTL_PATH = os.path.join(HERE, "tempctl.json")  # cold-start (heater) temperature rule
 SOCCTL_PATH = os.path.join(HERE, "socctl.json")    # low-house-SOC auto start/stop rule
+STATS_PATH = os.path.join(HERE, "stats.db")        # telemetry history (SQLite) for the Stats tab
 
 # ----------------------------------------------------------------------------- devices store
 def load_devices():
@@ -148,6 +151,8 @@ class Manager:
 
 mgr = Manager()
 app = FastAPI(title="EC-AGS+ Dashboard")
+# Vendored Chart.js + date adapter live here (served locally so the Stats page works fully offline).
+app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
 
 # ----------------------------------------------------------------------------- models
 class SaveDevice(BaseModel):
@@ -412,6 +417,7 @@ async def _on_startup():
     # this line and its UI card then. Not registering it means a stale socctl.json can't reactivate it.
     # asyncio.create_task(soc_control_loop())
     asyncio.create_task(volt_control_loop())
+    asyncio.create_task(stats_sampler_loop())
 
 class AutoConnectReq(BaseModel):
     enabled: bool
@@ -755,6 +761,93 @@ async def api_voltctl_set(r: VoltRule):
         raise HTTPException(400, "stop_above must be greater than start_below (need a hysteresis gap)")
     save_voltctl(r.model_dump())
     return {"ok": True}
+
+# ----------------------------------------------------------------------------- telemetry history (Stats)
+# Log house voltage / SOC / run-state to SQLite every minute so the Stats tab can chart trends and
+# charge cycles. SQLite (stdlib) survives restarts and stays tiny: 1 row/min ≈ 0.5M rows/yr. We keep
+# raw samples for STATS_RETENTION_DAYS and downsample server-side per query so charts stay light.
+STATS_SAMPLE_SEC = 60
+STATS_RETENTION_DAYS = 180
+STATS_RANGES = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "all": None}
+
+def _stats_db():
+    conn = sqlite3.connect(STATS_PATH, timeout=5.0)
+    conn.execute("CREATE TABLE IF NOT EXISTS samples ("
+                 "ts INTEGER PRIMARY KEY, house_v REAL, soc INTEGER, running INTEGER)")
+    return conn
+
+async def stats_sampler_loop():
+    while True:
+        try:
+            if mgr.state == "connected" and mgr.ags:
+                st = mgr.ags.telemetry.get("status") or {}
+                dc = mgr.ags.telemetry.get("dcvolts") or {}
+                hv, soc, state = dc.get("house_v"), st.get("soc_house_%"), st.get("state")
+                if hv is not None or soc is not None:   # skip empty frames (e.g. just after connect)
+                    running = 1 if state in ("Running", "Cranking") else 0
+                    ts = int(datetime.now().timestamp())
+                    conn = _stats_db()
+                    with conn:
+                        conn.execute("INSERT OR REPLACE INTO samples (ts, house_v, soc, running) "
+                                     "VALUES (?,?,?,?)", (ts, hv, soc, running))
+                        conn.execute("DELETE FROM samples WHERE ts < ?",
+                                     (ts - STATS_RETENTION_DAYS*86400,))
+                    conn.close()
+        except Exception:
+            pass
+        await asyncio.sleep(STATS_SAMPLE_SEC)
+
+@app.get("/api/stats")
+async def api_stats(range: str = "24h"):
+    if range not in STATS_RANGES:
+        raise HTTPException(400, f"range must be one of {list(STATS_RANGES)}")
+    now = int(datetime.now().timestamp())
+    span = STATS_RANGES[range]
+    iv = STATS_SAMPLE_SEC
+    series = {"t": [], "v": [], "soc": [], "run": []}
+    summary = {"runtime_sec": 0, "starts": 0, "v_min": None, "v_max": None, "v_avg": None, "n": 0}
+    try:
+        conn = _stats_db()
+        if span:
+            start = now - span
+        else:                                    # "all" → span the actual logged data, not epoch 0
+            row = conn.execute("SELECT MIN(ts) FROM samples").fetchone()
+            start = row[0] if row and row[0] is not None else now
+        # bucket width so we return ~720 points max (raw at 1/min for short ranges, coarser beyond)
+        iv = max(STATS_SAMPLE_SEC, ((now - start) // 720) or STATS_SAMPLE_SEC)
+        # downsampled series for the charts
+        for bucket, vavg, socmax, runmax in conn.execute(
+                "SELECT (ts/?)*? AS b, AVG(house_v), MAX(soc), MAX(running) FROM samples "
+                "WHERE ts >= ? GROUP BY b ORDER BY b", (iv, iv, start)):
+            series["t"].append(bucket * 1000)                       # ms for Chart.js time axis
+            series["v"].append(round(vavg, 3) if vavg is not None else None)
+            series["soc"].append(socmax)
+            series["run"].append(runmax or 0)
+        # summary from full-resolution rows (runtime ≈ running samples × sample interval; starts = 0→1)
+        prev_run, last_start_ts = 0, None
+        for ts, hv, run in conn.execute(
+                "SELECT ts, house_v, running FROM samples WHERE ts >= ? ORDER BY ts", (start,)):
+            summary["n"] += 1
+            if run:
+                summary["runtime_sec"] += STATS_SAMPLE_SEC
+            if run and not prev_run:
+                summary["starts"] += 1
+                last_start_ts = ts
+            prev_run = run
+            if hv is not None:
+                summary["v_min"] = hv if summary["v_min"] is None else min(summary["v_min"], hv)
+                summary["v_max"] = hv if summary["v_max"] is None else max(summary["v_max"], hv)
+        avg = conn.execute("SELECT AVG(house_v) FROM samples WHERE ts >= ? AND house_v IS NOT NULL",
+                           (start,)).fetchone()[0]
+        summary["v_avg"] = round(avg, 2) if avg is not None else None
+        summary["last_start_ts"] = (last_start_ts * 1000) if last_start_ts else None
+        conn.close()
+    except Exception as e:
+        raise HTTPException(500, f"stats query failed: {e}")
+    st = (mgr.ags.telemetry.get("status") or {}) if mgr.ags else {}
+    dc = (mgr.ags.telemetry.get("dcvolts") or {}) if mgr.ags else {}
+    now_vals = {"house_v": dc.get("house_v"), "soc": st.get("soc_house_%"), "state": st.get("state")}
+    return {"range": range, "bucket_sec": iv, "series": series, "summary": summary, "now": now_vals}
 
 @app.get("/", response_class=HTMLResponse)
 async def index():

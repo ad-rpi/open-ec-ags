@@ -57,6 +57,16 @@
   .muted { color:var(--mut); font-size:13px; }
   .state-banner { padding:10px 14px; border-radius:8px; margin-bottom:14px; font-size:14px; display:none; }
   .state-banner.err { display:block; background:#3a1a18; border:1px solid var(--red); color:#ffb3ae; }
+  .rng { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+  .rng button { background:none; border:1px solid var(--line); color:var(--mut); border-radius:20px;
+                padding:5px 13px; cursor:pointer; font-size:13px; }
+  .rng button.active { color:#fff; background:var(--accent); border-color:var(--accent); }
+  .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:14px; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .stat .n { font-size:20px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .stat .l { color:var(--mut); font-size:12px; margin-top:2px; }
+  .chartwrap { position:relative; height:220px; }
+  @media (max-width:560px){ .stats { grid-template-columns:repeat(2,1fr); } }
 </style>
 </head>
 <body>
@@ -73,6 +83,7 @@
   <button data-tab="quiet">Quiet Time</button>
   <button data-tab="schedule">Schedule</button>
   <button data-tab="history">History</button>
+  <button data-tab="stats">Stats</button>
   <button data-tab="devices">Devices</button>
   <button data-tab="settings">⚙</button>
 </nav>
@@ -271,6 +282,35 @@
     </div>
   </section>
 
+  <!-- STATS -->
+  <section class="tab" id="tab-stats">
+    <div class="rng" id="statsRange">
+      <button data-r="24h" class="active">24h</button>
+      <button data-r="7d">7d</button>
+      <button data-r="30d">30d</button>
+      <button data-r="all">All</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="n" id="st_v">—</div><div class="l">House volts now</div></div>
+      <div class="stat"><div class="n" id="st_soc">—</div><div class="l">SOC now</div></div>
+      <div class="stat"><div class="n" id="st_run">—</div><div class="l">Runtime (range)</div></div>
+      <div class="stat"><div class="n" id="st_starts">—</div><div class="l">Starts (range)</div></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">House battery voltage <span class="muted" id="st_vrange"></span></h3>
+      <div class="chartwrap"><canvas id="vChart"></canvas></div>
+      <div class="muted" style="margin-top:8px">Green bands = generator running. Min / avg / max in range:
+        <b id="st_vmm">—</b>.</div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">State of charge</h3>
+      <div class="chartwrap"><canvas id="socChart"></canvas></div>
+      <div class="muted" style="margin-top:8px">Coarse 4-level gauge (0 / 33 / 66 / 100). Last genset start:
+        <b id="st_laststart">—</b>.</div>
+    </div>
+    <p class="muted">Logged every minute while connected; history persists across restarts (kept ~180 days).</p>
+  </section>
+
   <!-- SETTINGS -->
   <section class="tab" id="tab-settings">
     <div class="card">
@@ -284,6 +324,8 @@
 </main>
 <div id="toast"></div>
 
+<script src="/static/chart.umd.js"></script>
+<script src="/static/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 let connected = false, busy = false, load_devices_cache = {};
@@ -305,6 +347,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==='devices') refreshSaved();
   if(b.dataset.tab==='schedule') refreshSchedules();
   if(b.dataset.tab==='history' && connected) loadHistory();
+  if(b.dataset.tab==='stats') loadStats();
   if(b.dataset.tab==='temp'){ if(connected) loadAuto(); loadTempCtl(); }
   if(b.dataset.tab==='settings') renderSettings();
 });
@@ -348,6 +391,59 @@ async function saveVoltCtl(){
     min_run_min:parseInt($('#v_minrun').value||'45') };
   try{ await api('POST','/api/voltctl',body); toast('voltage rule saved ✓'); loadVoltCtl(); }
   catch(e){ toast('✗ '+e.message); }
+}
+
+// ---- Stats (Chart.js, vendored locally so it works offline) ----
+let vChart=null, socChart=null, statsRange='24h';
+document.querySelectorAll('#statsRange button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#statsRange button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); statsRange=b.dataset.r; loadStats();
+});
+function fmtDur(s){ if(!s) return '0m'; const h=Math.floor(s/3600), m=Math.round((s%3600)/60);
+  return (h? h+'h ':'') + m + 'm'; }
+function fmtWhen(ms){ if(!ms) return '—';
+  return new Date(ms).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}); }
+async function loadStats(){
+  let d; try{ d = await api('GET','/api/stats?range='+statsRange); }
+  catch(e){ toast('✗ '+e.message); return; }
+  const s=d.series, sm=d.summary, nw=d.now;
+  $('#st_v').textContent      = nw.house_v==null ? '—' : nw.house_v.toFixed(2)+' V';
+  $('#st_soc').textContent    = nw.soc==null ? '—' : nw.soc+'%';
+  $('#st_run').textContent    = fmtDur(sm.runtime_sec);
+  $('#st_starts').textContent = sm.starts;
+  $('#st_vmm').textContent    = (sm.v_min==null) ? 'no data yet'
+      : `${sm.v_min.toFixed(2)} / ${sm.v_avg} / ${sm.v_max.toFixed(2)} V`;
+  $('#st_laststart').textContent = fmtWhen(sm.last_start_ts);
+  $('#st_vrange').textContent = s.t.length ? '' : '· no samples yet';
+  const vpts   = s.t.map((t,i)=>({x:t, y:s.v[i]}));
+  const runpts = s.t.map((t,i)=>({x:t, y:s.run[i]}));
+  const socpts = s.t.map((t,i)=>({x:t, y:s.soc[i]}));
+  const timeX = { type:'time', grid:{color:'#262d39'},
+                  ticks:{color:'#8b97a7', maxRotation:0, autoSkipPadding:24} };
+  if(vChart) vChart.destroy();
+  vChart = new Chart($('#vChart'), { type:'line',
+    data:{ datasets:[
+      { label:'running', data:runpts, yAxisID:'yRun', stepped:true, fill:'origin',
+        backgroundColor:'rgba(46,160,67,.12)', borderColor:'transparent', pointRadius:0, order:2 },
+      { label:'House V', data:vpts, yAxisID:'y', borderColor:'#2f81f7', borderWidth:2,
+        tension:.25, pointRadius:0, spanGaps:true, order:1 } ]},
+    options:{ responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{intersect:false, mode:'index'},
+      plugins:{ legend:{display:false},
+        tooltip:{ filter:i=>i.dataset.label==='House V',
+                  callbacks:{ label:c=> c.parsed.y==null ? null : ' '+c.parsed.y.toFixed(2)+' V' } } },
+      scales:{ x:timeX,
+        y:{ position:'left', grid:{color:'#262d39'}, ticks:{color:'#8b97a7', callback:v=>v+'V'} },
+        yRun:{ display:false, min:0, max:1 } } } });
+  if(socChart) socChart.destroy();
+  socChart = new Chart($('#socChart'), { type:'line',
+    data:{ datasets:[{ label:'SOC', data:socpts, borderColor:'#2ea043', borderWidth:2,
+      stepped:true, pointRadius:0, spanGaps:true }]},
+    options:{ responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{intersect:false, mode:'index'},
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:c=> c.parsed.y==null?null:' '+c.parsed.y+'%'}} },
+      scales:{ x:timeX, y:{ min:0, max:100, grid:{color:'#262d39'},
+        ticks:{color:'#8b97a7', stepSize:33, callback:v=>v+'%'} } } } });
 }
 
 // schedule day checkboxes (0=Mon .. 6=Sun)
