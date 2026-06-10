@@ -69,6 +69,12 @@ def load_state():
 def save_state(s):
     _atomic_write(STATE_PATH, s)
 
+def automation_enabled():
+    """Master server-side gate: is THIS app allowed to issue automated start/stop (voltage + temp rules)?
+    Persisted in state.json, default on. Completely independent of the genset's built-in auto mode, which
+    we never use (enabling it cranks the engine unconditionally — confirmed bug)."""
+    return load_state().get("automation_enabled", True)
+
 def _atomic_write(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
@@ -115,6 +121,10 @@ class Manager:
                 await self.ags.authenticate()
                 await self.ags.send_rpc(ag.RPC_GEN_STATUS)
                 self.state = "connected"
+                try:
+                    await self.ags.send_rpc(ag.RPC_AUTO_OFF)   # disarm genset built-in auto (it cranks on enable)
+                except Exception:
+                    pass
                 self.user_disconnected = False
                 st = load_state(); st["last"] = address; save_state(st)  # remember for autoconnect
             except Exception as e:
@@ -184,7 +194,21 @@ class QuietParams(BaseModel):
 async def api_state():
     return {"state": mgr.state, "error": mgr.error, "address": mgr.address,
             "name": mgr.name, "telemetry": (mgr.ags.telemetry if mgr.ags else {}),
-            "autoconnect": mgr.autoconnect, "last": load_state().get("last")}
+            "autoconnect": mgr.autoconnect, "last": load_state().get("last"),
+            "automation_enabled": automation_enabled()}
+
+class AutomationReq(BaseModel):
+    enabled: bool
+
+@app.get("/api/automation")
+async def api_automation_get():
+    return {"enabled": automation_enabled()}
+
+@app.post("/api/automation")
+async def api_automation_set(r: AutomationReq):
+    st = load_state(); st["automation_enabled"] = r.enabled; save_state(st)
+    log_event("automation_on" if r.enabled else "automation_off", "manual")
+    return {"ok": True}
 
 @app.get("/api/scan")
 async def api_scan(timeout: float = 8.0):
@@ -521,7 +545,7 @@ async def temp_control_loop():
     while True:
         try:
             cfg = load_tempctl()
-            if cfg.get("enabled") and mgr.state == "connected":
+            if cfg.get("enabled") and automation_enabled() and mgr.state == "connected":
                 temp = _current_temp()
                 state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
                 running = state in ("Running", "Cranking")
@@ -622,7 +646,7 @@ async def soc_control_loop():
     while True:
         try:
             cfg = load_socctl()
-            if cfg.get("enabled") and mgr.state == "connected":
+            if cfg.get("enabled") and automation_enabled() and mgr.state == "connected":
                 soc = _current_soc()
                 state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
                 running = state in ("Running", "Cranking")
@@ -727,7 +751,7 @@ async def volt_control_loop():
     while True:
         try:
             cfg = load_voltctl()
-            if cfg.get("enabled") and mgr.state == "connected":
+            if cfg.get("enabled") and automation_enabled() and mgr.state == "connected":
                 state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
                 running = state in ("Running", "Cranking")
                 v_start = _house_volts(avg=True)   # smoothed — rides through transient load sag

@@ -111,10 +111,12 @@
         <button class="act ghost" onclick="cmd('reset-fault')">Reset Fault</button>
       </div>
       <label class="row" style="justify-content:center;gap:10px;margin-top:14px;cursor:pointer">
-        <span class="k">Auto mode</span>
-        <span class="switch"><input type="checkbox" id="autoSwitch" onchange="setAutoMode(this.checked)"><span class="slider"></span></span>
+        <span class="k">App automation</span>
+        <span class="switch"><input type="checkbox" id="autoSwitch" onchange="setAutomation(this.checked)"><span class="slider"></span></span>
         <span class="muted" id="autoState" style="min-width:30px;text-align:left">—</span>
       </label>
+      <p class="muted" style="text-align:center;margin:6px 0 0">Master switch for this app's automated
+        start/stop (voltage &amp; cold-start rules). Does <b>not</b> touch the genset's own auto mode.</p>
     </div>
     <div class="card"><div id="metrics"></div></div>
     <p class="muted" id="noConnHint">Connect to a generator on the <b>Devices</b> tab first.</p>
@@ -150,11 +152,11 @@
       <pre id="v_log" class="muted" style="white-space:pre-wrap;margin:0">—</pre>
     </div>
     <div class="card">
-      <h3 style="margin-top:0">Battery voltage auto start/stop (genset built-in)</h3>
-      <p class="muted" style="margin-top:0">The genset's own rule — it works even when this dashboard is
-        off, and now reads real house volts (sense lead is wired). We keep it <b>OFF</b> so our app is the
-        single controller; turning it on would put two controllers on the bank (which short-cycled before).
-        Leave Auto mode <b>OFF</b> (Control tab) unless you deliberately want the genset to run this itself.</p>
+      <h3 style="margin-top:0">⚠ Genset built-in auto — do not enable</h3>
+      <p class="muted" style="margin-top:0"><b>Don't turn this on.</b> On this unit, enabling the genset's own
+        auto mode immediately cranks the engine with no trigger condition (confirmed bug — see the Activity log).
+        This app never uses it and sends auto-OFF on every connect to keep it disarmed. The fields below are
+        kept for diagnostics only — use <b>App automation</b> (Control tab) for hands-off start/stop.</p>
       <div class="row"><label style="margin:0">Enabled</label><input type="checkbox" id="a_batt"></div>
       <div class="grid">
         <div><label>Start when below (V)</label><input type="number" step="0.1" id="a_startv"></div>
@@ -485,7 +487,10 @@ async function poll(){
     $('#errBanner').textContent = s.error?('⚠ '+s.error):'';
     $('#noConnHint').style.display = connected?'none':'block';
     document.querySelectorAll('.act:not(.ghost), #tab-control .act').forEach(b=>{});
-    ['startBtn','stopBtn','autoSwitch'].forEach(id=>$('#'+id).disabled=!connected);
+    ['startBtn','stopBtn'].forEach(id=>$('#'+id).disabled=!connected);
+    // App-automation master is a server-side setting (works regardless of BLE) — reflect it live
+    if(!busy){ $('#autoSwitch').checked = !!s.automation_enabled;
+               $('#autoState').textContent = s.automation_enabled?'ON':'OFF'; }
     renderTelemetry(s.telemetry||{});
   }catch(e){ $('#connText').textContent='server error'; }
 }
@@ -558,10 +563,7 @@ function updateMetrics(t){
 function renderTelemetry(t){
   lastTelem=t; const st=t.status||{};
   $('#genState').textContent = st.state || (connected?'…':'—');
-  const am = !!st.auto_mode;
-  $('#genSub').textContent = connected ? (am?'Genset auto mode':'Manual mode') : '';
-  $('#autoSwitch').checked = am;                          // live-reflect (catches auto flipping on its own)
-  $('#autoState').textContent = connected ? (am?'ON':'OFF') : '';
+  $('#genSub').textContent = '';   // app automation state is shown on the toggle (set from /api/state in poll)
   updateMetrics(t);
 }
 function renderSettings(){
@@ -587,8 +589,9 @@ function toggleMetric(k,on){ visible[k]=on; saveVisible(); buildMetrics(); }
 function setAllMetrics(on){ METRICS.forEach(m=>visible[m.k]=on); saveVisible(); buildMetrics(); renderSettings(); }
 function resetMetrics(){ METRICS.forEach(m=>visible[m.k]=m.def); saveVisible(); buildMetrics(); renderSettings(); }
 
-const EV_LABEL = { started:'▶ Started', stopped:'■ Stopped', auto_on:'⚙ Auto mode ON',
-                   auto_off:'⚙ Auto mode OFF', fault:'⚠ Fault' };
+const EV_LABEL = { started:'▶ Started', stopped:'■ Stopped', auto_on:'⚙ Genset auto ON',
+                   auto_off:'⚙ Genset auto OFF', fault:'⚠ Fault',
+                   automation_on:'⚙ App automation ON', automation_off:'⚙ App automation OFF' };
 const EV_COLOR = { started:'var(--green)', fault:'var(--red)' };
 const CAUSE_LABEL = { voltage_rule:'voltage rule', temp_rule:'temp rule', schedule:'schedule',
                       manual:'manual', 'manual/genset':'manual / genset', genset:'genset' };
@@ -638,9 +641,10 @@ async function cmd(c){
   try{ await api('POST','/api/command/'+c); toast(c+' sent'); }
   catch(e){ toast('✗ '+e.message); } finally{ busy=false; }
 }
-async function setAutoMode(on){
+async function setAutomation(on){
   if(busy) return; busy=true;
-  try{ await api('POST','/api/command/'+(on?'auto-on':'auto-off')); toast('genset auto '+(on?'ON':'OFF')); }
+  try{ await api('POST','/api/automation',{enabled:on}); toast('app automation '+(on?'ON':'OFF'));
+       $('#autoState').textContent=on?'ON':'OFF'; }
   catch(e){ toast('✗ '+e.message); $('#autoSwitch').checked=!on; } finally{ busy=false; }
 }
 
