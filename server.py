@@ -207,7 +207,7 @@ async def api_automation_get():
 @app.post("/api/automation")
 async def api_automation_set(r: AutomationReq):
     st = load_state(); st["automation_enabled"] = r.enabled; save_state(st)
-    log_event("automation_on" if r.enabled else "automation_off", "manual")
+    await log_event("automation_on" if r.enabled else "automation_off", "manual")
     return {"ok": True}
 
 @app.get("/api/scan")
@@ -297,7 +297,7 @@ async def api_command(cmd: str):
     if cmd in ("start", "stop"):
         note_command(cmd, "manual")                 # watcher attributes the resulting state change
     elif cmd in ("auto-on", "auto-off"):
-        log_event(cmd.replace("-", "_"), "manual")  # no state change → log the toggle directly
+        await log_event(cmd.replace("-", "_"), "manual")  # no state change → log the toggle directly
     return {"ok": True}
 
 @app.get("/api/auto")
@@ -396,7 +396,7 @@ async def _scheduler_fire(entry):
     if act in ("start", "stop"):
         note_command(act, "schedule")
     elif act in ("auto-on", "auto-off"):
-        log_event(act.replace("-", "_"), "schedule")
+        await log_event(act.replace("-", "_"), "schedule")
 
 async def scheduler_loop():
     while True:
@@ -810,11 +810,86 @@ STATS_RANGES = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "all": None}
 
 def _stats_db():
     conn = sqlite3.connect(STATS_PATH, timeout=5.0)
+    conn.execute("PRAGMA journal_mode=WAL")     # readers and the writer don't block each other
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("CREATE TABLE IF NOT EXISTS samples ("
                  "ts INTEGER PRIMARY KEY, house_v REAL, soc INTEGER, running INTEGER)")
     conn.execute("CREATE TABLE IF NOT EXISTS events ("
                  "ts INTEGER, event TEXT, cause TEXT, detail TEXT)")
     return conn
+
+# SQLite calls are BLOCKING, so every DB touch runs in a worker thread (asyncio.to_thread) — a slow or
+# lock-contended query can never stall the event loop, and thus never stalls the BLE handling. WAL (above)
+# keeps reads and the single writer from blocking each other. These _db_* helpers are the ONLY code that
+# talks to SQLite; callers always reach them via asyncio.to_thread.
+def _db_insert_sample(ts, hv, soc, running):
+    conn = _stats_db()
+    try:
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO samples (ts, house_v, soc, running) VALUES (?,?,?,?)",
+                         (ts, hv, soc, running))
+            conn.execute("DELETE FROM samples WHERE ts < ?", (ts - STATS_RETENTION_DAYS*86400,))
+    finally:
+        conn.close()
+
+def _db_log_event(ts, event, cause, detail):
+    conn = _stats_db()
+    try:
+        with conn:
+            conn.execute("INSERT INTO events (ts,event,cause,detail) VALUES (?,?,?,?)",
+                         (ts, event, cause, detail))
+            conn.execute("DELETE FROM events WHERE ts < ?", (ts - STATS_RETENTION_DAYS*86400,))
+    finally:
+        conn.close()
+
+def _db_query_events(limit):
+    conn = _stats_db()
+    try:
+        rows = conn.execute("SELECT ts,event,cause,detail FROM events ORDER BY ts DESC LIMIT ?",
+                            (limit,)).fetchall()
+    finally:
+        conn.close()
+    return [{"ts": ts*1000, "event": ev, "cause": c, "detail": d} for ts, ev, c, d in rows]
+
+def _db_query_stats(now, span):
+    conn = _stats_db()
+    series = {"t": [], "v": [], "soc": [], "run": []}
+    summary = {"runtime_sec": 0, "starts": 0, "v_min": None, "v_max": None, "v_avg": None, "n": 0}
+    try:
+        if span:
+            start = now - span
+        else:                                    # "all" → span the actual logged data, not epoch 0
+            row = conn.execute("SELECT MIN(ts) FROM samples").fetchone()
+            start = row[0] if row and row[0] is not None else now
+        # bucket width so we return ~720 points max (raw at 1/min for short ranges, coarser beyond)
+        iv = max(STATS_SAMPLE_SEC, ((now - start) // 720) or STATS_SAMPLE_SEC)
+        for bucket, vavg, socmax, runmax in conn.execute(
+                "SELECT (ts/?)*? AS b, AVG(house_v), MAX(soc), MAX(running) FROM samples "
+                "WHERE ts >= ? GROUP BY b ORDER BY b", (iv, iv, start)):
+            series["t"].append(bucket * 1000)                       # ms for Chart.js time axis
+            series["v"].append(round(vavg, 3) if vavg is not None else None)
+            series["soc"].append(socmax)
+            series["run"].append(runmax or 0)
+        prev_run, last_start_ts = 0, None
+        for ts, hv, run in conn.execute(
+                "SELECT ts, house_v, running FROM samples WHERE ts >= ? ORDER BY ts", (start,)):
+            summary["n"] += 1
+            if run:
+                summary["runtime_sec"] += STATS_SAMPLE_SEC
+            if run and not prev_run:
+                summary["starts"] += 1
+                last_start_ts = ts
+            prev_run = run
+            if hv is not None:
+                summary["v_min"] = hv if summary["v_min"] is None else min(summary["v_min"], hv)
+                summary["v_max"] = hv if summary["v_max"] is None else max(summary["v_max"], hv)
+        avg = conn.execute("SELECT AVG(house_v) FROM samples WHERE ts >= ? AND house_v IS NOT NULL",
+                           (start,)).fetchone()[0]
+        summary["v_avg"] = round(avg, 2) if avg is not None else None
+        summary["last_start_ts"] = (last_start_ts * 1000) if last_start_ts else None
+    finally:
+        conn.close()
+    return iv, series, summary
 
 async def stats_sampler_loop():
     while True:
@@ -826,13 +901,7 @@ async def stats_sampler_loop():
                 if hv is not None or soc is not None:   # skip empty frames (e.g. just after connect)
                     running = 1 if state in ("Running", "Cranking") else 0
                     ts = int(datetime.now().timestamp())
-                    conn = _stats_db()
-                    with conn:
-                        conn.execute("INSERT OR REPLACE INTO samples (ts, house_v, soc, running) "
-                                     "VALUES (?,?,?,?)", (ts, hv, soc, running))
-                        conn.execute("DELETE FROM samples WHERE ts < ?",
-                                     (ts - STATS_RETENTION_DAYS*86400,))
-                    conn.close()
+                    await asyncio.to_thread(_db_insert_sample, ts, hv, soc, running)
         except Exception:
             pass
         await asyncio.sleep(STATS_SAMPLE_SEC)
@@ -852,15 +921,10 @@ def note_command(action, cause, detail=""):
     global _pending_cmd
     _pending_cmd = {"action": action, "cause": cause, "detail": detail, "ts": datetime.now()}
 
-def log_event(event, cause, detail=""):
+async def log_event(event, cause, detail=""):
     try:
         ts = int(datetime.now().timestamp())
-        conn = _stats_db()
-        with conn:
-            conn.execute("INSERT INTO events (ts,event,cause,detail) VALUES (?,?,?,?)",
-                         (ts, event, cause, detail))
-            conn.execute("DELETE FROM events WHERE ts < ?", (ts - STATS_RETENTION_DAYS*86400,))
-        conn.close()
+        await asyncio.to_thread(_db_log_event, ts, event, cause, detail)
     except Exception:
         pass
 
@@ -882,11 +946,11 @@ async def event_watch_loop():
                             cause, detail, _pending_cmd = p["cause"], p["detail"], None
                         else:
                             cause, detail = "manual/genset", ""   # not us → panel button or genset auto
-                        log_event("started" if runningish else "stopped", cause, detail)
+                        await log_event("started" if runningish else "stopped", cause, detail)
                         _evt_runningish = runningish
                     fc = st.get("fault_code")
                     if fc and fc != _evt_fault:
-                        log_event("fault", "genset", faultcodes.lookup(fc).get("name", f"code {fc}"))
+                        await log_event("fault", "genset", faultcodes.lookup(fc).get("name", f"code {fc}"))
                     _evt_fault = fc
             else:
                 _evt_runningish, _evt_fault = None, None          # reset baseline on disconnect
@@ -898,13 +962,10 @@ async def event_watch_loop():
 async def api_events(limit: int = 50):
     limit = max(1, min(limit, 500))
     try:
-        conn = _stats_db()
-        rows = conn.execute("SELECT ts,event,cause,detail FROM events ORDER BY ts DESC LIMIT ?",
-                            (limit,)).fetchall()
-        conn.close()
+        events = await asyncio.to_thread(_db_query_events, limit)
     except Exception as e:
         raise HTTPException(500, f"events query failed: {e}")
-    return {"events": [{"ts": ts*1000, "event": ev, "cause": c, "detail": d} for ts, ev, c, d in rows]}
+    return {"events": events}
 
 @app.get("/api/stats")
 async def api_stats(range: str = "24h"):
@@ -912,45 +973,8 @@ async def api_stats(range: str = "24h"):
         raise HTTPException(400, f"range must be one of {list(STATS_RANGES)}")
     now = int(datetime.now().timestamp())
     span = STATS_RANGES[range]
-    iv = STATS_SAMPLE_SEC
-    series = {"t": [], "v": [], "soc": [], "run": []}
-    summary = {"runtime_sec": 0, "starts": 0, "v_min": None, "v_max": None, "v_avg": None, "n": 0}
     try:
-        conn = _stats_db()
-        if span:
-            start = now - span
-        else:                                    # "all" → span the actual logged data, not epoch 0
-            row = conn.execute("SELECT MIN(ts) FROM samples").fetchone()
-            start = row[0] if row and row[0] is not None else now
-        # bucket width so we return ~720 points max (raw at 1/min for short ranges, coarser beyond)
-        iv = max(STATS_SAMPLE_SEC, ((now - start) // 720) or STATS_SAMPLE_SEC)
-        # downsampled series for the charts
-        for bucket, vavg, socmax, runmax in conn.execute(
-                "SELECT (ts/?)*? AS b, AVG(house_v), MAX(soc), MAX(running) FROM samples "
-                "WHERE ts >= ? GROUP BY b ORDER BY b", (iv, iv, start)):
-            series["t"].append(bucket * 1000)                       # ms for Chart.js time axis
-            series["v"].append(round(vavg, 3) if vavg is not None else None)
-            series["soc"].append(socmax)
-            series["run"].append(runmax or 0)
-        # summary from full-resolution rows (runtime ≈ running samples × sample interval; starts = 0→1)
-        prev_run, last_start_ts = 0, None
-        for ts, hv, run in conn.execute(
-                "SELECT ts, house_v, running FROM samples WHERE ts >= ? ORDER BY ts", (start,)):
-            summary["n"] += 1
-            if run:
-                summary["runtime_sec"] += STATS_SAMPLE_SEC
-            if run and not prev_run:
-                summary["starts"] += 1
-                last_start_ts = ts
-            prev_run = run
-            if hv is not None:
-                summary["v_min"] = hv if summary["v_min"] is None else min(summary["v_min"], hv)
-                summary["v_max"] = hv if summary["v_max"] is None else max(summary["v_max"], hv)
-        avg = conn.execute("SELECT AVG(house_v) FROM samples WHERE ts >= ? AND house_v IS NOT NULL",
-                           (start,)).fetchone()[0]
-        summary["v_avg"] = round(avg, 2) if avg is not None else None
-        summary["last_start_ts"] = (last_start_ts * 1000) if last_start_ts else None
-        conn.close()
+        iv, series, summary = await asyncio.to_thread(_db_query_stats, now, span)
     except Exception as e:
         raise HTTPException(500, f"stats query failed: {e}")
     st = (mgr.ags.telemetry.get("status") or {}) if mgr.ags else {}
