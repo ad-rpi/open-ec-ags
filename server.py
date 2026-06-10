@@ -270,6 +270,10 @@ async def api_command(cmd: str):
     if cmd not in COMMANDS:
         raise HTTPException(400, f"unknown command {cmd}")
     await mgr.op(lambda ags: ags.send_rpc(COMMANDS[cmd]))
+    if cmd in ("start", "stop"):
+        note_command(cmd, "manual")                 # watcher attributes the resulting state change
+    elif cmd in ("auto-on", "auto-off"):
+        log_event(cmd.replace("-", "_"), "manual")  # no state change → log the toggle directly
     return {"ok": True}
 
 @app.get("/api/auto")
@@ -364,6 +368,11 @@ async def _scheduler_fire(entry):
     async with mgr.lock:
         ags = mgr.require()
         await ags.send_rpc(COMMANDS[entry["action"]])
+    act = entry["action"]
+    if act in ("start", "stop"):
+        note_command(act, "schedule")
+    elif act in ("auto-on", "auto-off"):
+        log_event(act.replace("-", "_"), "schedule")
 
 async def scheduler_loop():
     while True:
@@ -418,6 +427,7 @@ async def _on_startup():
     # asyncio.create_task(soc_control_loop())
     asyncio.create_task(volt_control_loop())
     asyncio.create_task(stats_sampler_loop())
+    asyncio.create_task(event_watch_loop())
 
 class AutoConnectReq(BaseModel):
     enabled: bool
@@ -524,6 +534,7 @@ async def temp_control_loop():
                                 await mgr.require().send_rpc(ag.RPC_START_GEN)
                             _temp_started, _temp_start_ts = True, datetime.now()
                             _log_temp(f"START — temp {temp} ≤ {sb}")
+                            note_command("start", "temp_rule", f"temp {temp} ≤ {sb}")
                         except Exception as ex:
                             _log_temp(f"start FAILED: {ex}")
                     elif temp >= sa and _temp_started:
@@ -534,6 +545,7 @@ async def temp_control_loop():
                                     await mgr.require().send_rpc(ag.RPC_STOP_GEN)
                                 _temp_started, _temp_start_ts = False, None
                                 _log_temp(f"STOP — temp {temp} ≥ {sa}")
+                                note_command("stop", "temp_rule", f"temp {temp} ≥ {sa}")
                             except Exception as ex:
                                 _log_temp(f"stop FAILED: {ex}")
                 # we think we started it, but it's not running → someone else stopped it; let go
@@ -728,6 +740,7 @@ async def volt_control_loop():
                             await mgr.require().send_rpc(ag.RPC_START_GEN)
                         _volt_started, _volt_start_ts = True, datetime.now()
                         _log_volt(f"START — house {v_start:.2f}V ≤ {sb}V")
+                        note_command("start", "voltage_rule", f"house {v_start:.2f}V ≤ {sb}V")
                     except Exception as ex:
                         _log_volt(f"start FAILED: {ex}")
                 elif v_now is not None and v_now >= sa and _volt_started:
@@ -738,6 +751,7 @@ async def volt_control_loop():
                                 await mgr.require().send_rpc(ag.RPC_STOP_GEN)
                             _volt_started, _volt_start_ts = False, None
                             _log_volt(f"STOP — house {v_now:.2f}V ≥ {sa}V")
+                            note_command("stop", "voltage_rule", f"house {v_now:.2f}V ≥ {sa}V")
                         except Exception as ex:
                             _log_volt(f"stop FAILED: {ex}")
                 # we think we started it, but it's not running → someone else stopped it; let go
@@ -774,6 +788,8 @@ def _stats_db():
     conn = sqlite3.connect(STATS_PATH, timeout=5.0)
     conn.execute("CREATE TABLE IF NOT EXISTS samples ("
                  "ts INTEGER PRIMARY KEY, house_v REAL, soc INTEGER, running INTEGER)")
+    conn.execute("CREATE TABLE IF NOT EXISTS events ("
+                 "ts INTEGER, event TEXT, cause TEXT, detail TEXT)")
     return conn
 
 async def stats_sampler_loop():
@@ -796,6 +812,75 @@ async def stats_sampler_loop():
         except Exception:
             pass
         await asyncio.sleep(STATS_SAMPLE_SEC)
+
+# ----------------------------------------------------------------------------- activity / event log
+# A single watcher loop is the ONLY writer: it observes real state + fault transitions and logs an
+# attributed event. Whoever issues a start/stop (manual endpoint, scheduler, a rule) calls note_command()
+# first to leave a "who did this" hint; the watcher consumes it to attribute the resulting transition, and
+# falls back to "manual/genset" for changes we didn't cause (panel button or the genset's own auto mode).
+# This keeps every start/stop logged exactly once with a cause. Auto-mode toggles have no state change, so
+# those are logged directly via log_event(). Stored in stats.db (events table), pruned with the samples.
+_pending_cmd = None      # {"action","cause","detail","ts"} — hint for the watcher
+_evt_runningish = None   # last observed running-ish state (None = no baseline yet / disconnected)
+_evt_fault = None        # last observed active fault code
+
+def note_command(action, cause, detail=""):
+    global _pending_cmd
+    _pending_cmd = {"action": action, "cause": cause, "detail": detail, "ts": datetime.now()}
+
+def log_event(event, cause, detail=""):
+    try:
+        ts = int(datetime.now().timestamp())
+        conn = _stats_db()
+        with conn:
+            conn.execute("INSERT INTO events (ts,event,cause,detail) VALUES (?,?,?,?)",
+                         (ts, event, cause, detail))
+            conn.execute("DELETE FROM events WHERE ts < ?", (ts - STATS_RETENTION_DAYS*86400,))
+        conn.close()
+    except Exception:
+        pass
+
+async def event_watch_loop():
+    global _evt_runningish, _evt_fault, _pending_cmd
+    while True:
+        try:
+            if mgr.state == "connected" and mgr.ags:
+                st = mgr.ags.telemetry.get("status") or {}
+                state = st.get("state")
+                if state:
+                    runningish = state in ("Running", "Cranking", "Priming")
+                    if _evt_runningish is None:
+                        _evt_runningish = runningish            # silent baseline — don't log on connect
+                    elif runningish != _evt_runningish:
+                        action = "start" if runningish else "stop"
+                        p = _pending_cmd
+                        if p and p["action"] == action and (datetime.now()-p["ts"]).total_seconds() < 150:
+                            cause, detail, _pending_cmd = p["cause"], p["detail"], None
+                        else:
+                            cause, detail = "manual/genset", ""   # not us → panel button or genset auto
+                        log_event("started" if runningish else "stopped", cause, detail)
+                        _evt_runningish = runningish
+                    fc = st.get("fault_code")
+                    if fc and fc != _evt_fault:
+                        log_event("fault", "genset", faultcodes.lookup(fc).get("name", f"code {fc}"))
+                    _evt_fault = fc
+            else:
+                _evt_runningish, _evt_fault = None, None          # reset baseline on disconnect
+        except Exception:
+            pass
+        await asyncio.sleep(10)
+
+@app.get("/api/events")
+async def api_events(limit: int = 50):
+    limit = max(1, min(limit, 500))
+    try:
+        conn = _stats_db()
+        rows = conn.execute("SELECT ts,event,cause,detail FROM events ORDER BY ts DESC LIMIT ?",
+                            (limit,)).fetchall()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(500, f"events query failed: {e}")
+    return {"events": [{"ts": ts*1000, "event": ev, "cause": c, "detail": d} for ts, ev, c, d in rows]}
 
 @app.get("/api/stats")
 async def api_stats(range: str = "24h"):

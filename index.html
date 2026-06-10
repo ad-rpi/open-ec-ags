@@ -283,11 +283,17 @@
   <section class="tab" id="tab-history">
     <div class="card">
       <div class="row"><h3 style="margin:0">Active fault</h3>
-        <button class="act ghost" onclick="loadHistory()" id="histBtn">Refresh</button></div>
+        <button class="act ghost" onclick="loadEvents();loadHistory()" id="histBtn">Refresh</button></div>
       <div id="activeFault" class="muted">—</div>
     </div>
     <div class="card">
-      <h3 style="margin-top:0">Event history</h3>
+      <h3 style="margin-top:0">Activity</h3>
+      <div id="activityList" class="muted">Loading…</div>
+      <div class="muted" style="margin-top:8px">Generator starts/stops, auto-mode changes, and faults,
+        logged by this dashboard while it's running — with what caused each one.</div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Fault history (from the genset)</h3>
       <div id="eventList" class="muted">Connect and press Refresh.</div>
     </div>
   </section>
@@ -356,7 +362,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==='quiet' && connected) loadQuiet();
   if(b.dataset.tab==='devices') refreshSaved();
   if(b.dataset.tab==='schedule') refreshSchedules();
-  if(b.dataset.tab==='history' && connected) loadHistory();
+  if(b.dataset.tab==='history'){ loadEvents(); if(connected) loadHistory(); }
   if(b.dataset.tab==='stats') loadStats();
   if(b.dataset.tab==='temp'){ if(connected) loadAuto(); loadTempCtl(); }
   if(b.dataset.tab==='settings') renderSettings();
@@ -581,6 +587,26 @@ function toggleMetric(k,on){ visible[k]=on; saveVisible(); buildMetrics(); }
 function setAllMetrics(on){ METRICS.forEach(m=>visible[m.k]=on); saveVisible(); buildMetrics(); renderSettings(); }
 function resetMetrics(){ METRICS.forEach(m=>visible[m.k]=m.def); saveVisible(); buildMetrics(); renderSettings(); }
 
+const EV_LABEL = { started:'▶ Started', stopped:'■ Stopped', auto_on:'⚙ Auto mode ON',
+                   auto_off:'⚙ Auto mode OFF', fault:'⚠ Fault' };
+const EV_COLOR = { started:'var(--green)', fault:'var(--red)' };
+const CAUSE_LABEL = { voltage_rule:'voltage rule', temp_rule:'temp rule', schedule:'schedule',
+                      manual:'manual', 'manual/genset':'manual / genset', genset:'genset' };
+async function loadEvents(){
+  $('#activityList').innerHTML='<span class="muted">Loading…</span>';
+  try{
+    const d=await api('GET','/api/events?limit=100');
+    $('#activityList').innerHTML = (d.events&&d.events.length)
+      ? d.events.map(e=>{
+          const lbl=EV_LABEL[e.event]||e.event, col=EV_COLOR[e.event]||'var(--fg)';
+          const cause=CAUSE_LABEL[e.cause]||e.cause, det=e.detail?(' — '+e.detail):'';
+          return `<div class="row"><span class="k">${new Date(e.ts).toLocaleString()}</span>
+            <span class="v" style="color:${col}">${lbl}<span class="muted" style="font-weight:400"> · ${cause}${det}</span></span></div>`;
+        }).join('')
+      : '<span class="muted">No activity logged yet. Starts/stops, auto-mode changes, and faults '
+        +'will appear here as they happen while the dashboard is running.</span>';
+  }catch(e){ $('#activityList').textContent='✗ '+e.message; }
+}
 async function loadHistory(){
   if(!connected){
     $('#activeFault').textContent='—';
