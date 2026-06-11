@@ -81,6 +81,15 @@ def _atomic_write(path, obj):
         json.dump(obj, f, indent=2)
     os.replace(tmp, path)
 
+# States in which the engine is in its start/run cycle (i.e. NOT stopped). One source of truth for
+# the auto rules and the activity watcher so they can't drift apart (the copy-pasted literal is what
+# let the fault-logging check desync). "Priming" is only ever entered by an EXPLICIT prime — holding
+# the physical start switch, or the official app's prime+start; the genset does not self-prime and
+# our stack never commands one, so a rule-started run never reaches it. It's included only to keep
+# the rules consistent with the watcher (and harmless if a panel prime is ever seen on the link).
+# The stats sampler intentionally uses its own narrower set for run-time accounting.
+RUN_CYCLE_STATES = ("Running", "Cranking", "Priming")
+
 # ----------------------------------------------------------------------------- BLE manager
 class Manager:
     def __init__(self):
@@ -546,7 +555,7 @@ async def temp_control_loop():
             if cfg.get("enabled") and automation_enabled() and mgr.state == "connected":
                 temp = _current_temp()
                 state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
-                running = state in ("Running", "Cranking")
+                running = state in RUN_CYCLE_STATES
                 if temp is not None:
                     sb, sa = cfg["start_below"], cfg["stop_above"]
                     minrun = cfg.get("min_run_min", 20) * 60
@@ -647,7 +656,7 @@ async def soc_control_loop():
             if cfg.get("enabled") and automation_enabled() and mgr.state == "connected":
                 soc = _current_soc()
                 state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
-                running = state in ("Running", "Cranking")
+                running = state in RUN_CYCLE_STATES
                 if soc is not None:
                     sb, sa = cfg["start_below"], cfg["stop_above"]
                     minrun = cfg.get("min_run_min", 30) * 60
@@ -751,7 +760,7 @@ async def volt_control_loop():
             cfg = load_voltctl()
             if cfg.get("enabled") and automation_enabled() and mgr.state == "connected":
                 state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
-                running = state in ("Running", "Cranking")
+                running = state in RUN_CYCLE_STATES
                 v_start = _house_volts(avg=True)   # smoothed — rides through transient load sag
                 v_now = _house_volts()             # instant — responsive to the charge voltage rising
                 sb, sa = cfg["start_below"], cfg["stop_above"]
@@ -934,7 +943,7 @@ async def event_watch_loop():
                 st = mgr.ags.telemetry.get("status") or {}
                 state = st.get("state")
                 if state:
-                    runningish = state in ("Running", "Cranking", "Priming")
+                    runningish = state in RUN_CYCLE_STATES
                     if _evt_runningish is None:
                         _evt_runningish = runningish            # silent baseline — don't log on connect
                     elif runningish != _evt_runningish:

@@ -486,7 +486,6 @@ async function poll(){
     $('#errBanner').style.display = s.error?'block':'none';
     $('#errBanner').textContent = s.error?('⚠ '+s.error):'';
     $('#noConnHint').style.display = connected?'none':'block';
-    document.querySelectorAll('.act:not(.ghost), #tab-control .act').forEach(b=>{});
     ['startBtn','stopBtn'].forEach(id=>$('#'+id).disabled=!connected);
     // App-automation master is a server-side setting (works regardless of BLE) — reflect it live
     if(!busy){ $('#autoSwitch').checked = !!s.automation_enabled;
