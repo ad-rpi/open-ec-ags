@@ -947,9 +947,14 @@ async def event_watch_loop():
                         await log_event("started" if runningish else "stopped", cause, detail)
                         _evt_runningish = runningish
                     fc = st.get("fault_code")
-                    if fc and fc != _evt_fault:
-                        await log_event("fault", "genset", faultcodes.lookup(fc).get("name", f"code {fc}"))
-                    _evt_fault = fc
+                    if _evt_fault is None:
+                        _evt_fault = fc                     # silent baseline — don't re-log a fault that
+                                                            # was already standing when we (re)connected
+                    elif fc != _evt_fault:
+                        if fc:                              # new active fault; a clear (→0) isn't logged
+                            await log_event("fault", "genset",
+                                            faultcodes.lookup(fc).get("name", f"code {fc}"))
+                        _evt_fault = fc
             else:
                 _evt_runningish, _evt_fault = None, None          # reset baseline on disconnect
         except Exception:
