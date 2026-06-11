@@ -384,7 +384,9 @@ _sched_log = []     # recent fire results, newest last
 async def _scheduler_fire(entry):
     addr = entry["device"]
     saved = load_devices().get(addr, {})
-    if entry["action"] not in COMMANDS:
+    # Only start/stop may be scheduled — notably NOT auto-on, which cranks the engine on this unit.
+    # Checked here as well as at save time so a hand-edited schedules.json can't bypass it.
+    if entry["action"] not in ("start", "stop"):
         raise ValueError(f"bad action {entry['action']}")
     # Make sure we're connected to the right device, then send.
     if not (mgr.state == "connected" and mgr.address == addr):
@@ -392,11 +394,7 @@ async def _scheduler_fire(entry):
     async with mgr.lock:
         ags = mgr.require()
         await ags.send_rpc(COMMANDS[entry["action"]])
-    act = entry["action"]
-    if act in ("start", "stop"):
-        note_command(act, "schedule")
-    elif act in ("auto-on", "auto-off"):
-        await log_event(act.replace("-", "_"), "schedule")
+    note_command(entry["action"], "schedule")
 
 async def scheduler_loop():
     while True:
@@ -470,7 +468,7 @@ async def api_sched_list():
 
 @app.post("/api/schedules")
 async def api_sched_save(s: Schedule):
-    if s.action not in COMMANDS:
+    if s.action not in ("start", "stop"):
         raise HTTPException(400, "action must be start or stop")
     schedules = load_schedules()
     d = s.model_dump()
