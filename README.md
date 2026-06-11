@@ -53,8 +53,8 @@ Commands: `scan, status, start, stop, auto-on, auto-off, reset-fault, info, moni
 
 ## Web dashboard
 
-A browser dashboard (scan / pair / save devices, live status, start/stop, and the auto start/stop
-+ quiet-time settings) is in `server.py` + `index.html`.
+A browser dashboard (scan / pair / save devices, live status, start/stop, automated start/stop
+rules, schedules, history, and stats charts) is in `server.py` + `index.html`.
 
 ```bash
 .venv/bin/pip install -r requirements.txt
@@ -67,13 +67,37 @@ A browser dashboard (scan / pair / save devices, live status, start/stop, and th
   on by default) reconnects to the last-used device automatically on server startup and whenever the
   BLE link drops — unless you hit **Disconnect** yourself, which stays disconnected until you
   reconnect or re-arm the toggle. Last device + the toggle persist in `state.json`.
-* **Control tab** — live state (Running/Stopped/Cranking/Priming), output V/Hz/load, battery,
-  house SOC, fault code, run time; Start / Stop / Auto ON-OFF / Reset Fault buttons.
-* **Auto Start/Stop tab** — battery-voltage start/stop thresholds + min run time, and the three
-  temperature (A/C) zones. (Remember to also turn Auto mode **ON**.)
-* **Quiet Time tab** — per-day quiet window during which the genset's own auto mode is suppressed.
-* **History tab** — the genset's stored fault/event log (timestamp + decoded fault name) plus the
-  current active fault. Fault names/descriptions come from `faultcodes.py` (extracted from the app).
+* **Control tab** — live state (Running/Stopped/Cranking/Priming), output voltage, battery volts,
+  house SOC, fault code, run time; Start / Stop / Reset Fault buttons; and the **App automation**
+  master switch — one server-side gate for all of this app's automated start/stop rules (battery
+  voltage + cold start). Turn it off and the app observes but never starts or stops anything on its own.
+* **Battery Start/Stop tab** — a server-side rule that starts the generator when the **house battery
+  voltage** sags below a threshold and stops it once charged back up (hysteresis gap, minimum run
+  time, and it only stops a run it started itself). Runs on this machine, so the server must be up —
+  the upside is full visibility and one single place that decides when the genset runs.
+
+  > ⚠️ **The genset's built-in auto mode is deliberately not used.** On the tested unit, enabling
+  > built-in auto mode immediately cranked the engine even with every trigger (battery sense, A/C
+  > sense, temperature zones) disabled. This app sends auto-OFF on every connect to keep it disarmed,
+  > and the built-in settings are shown for diagnostics only. If your unit behaves differently,
+  > reports welcome — but test with care.
+* **Temperature Startup tab** — two separate mechanisms: **Hot start (A/C)** is the genset's own
+  feature (zone goes *above* a setpoint → start, for air conditioning; works without this dashboard
+  but requires the built-in auto mode — see the warning above). **Cold start (heater)** is a
+  server-side rule that starts the generator when it gets *cold* so a heater can run off generator
+  power instead of draining the batteries; reads the genset's remote temp sensor or an external
+  reading POSTed to `/api/temp`. Same guards as the battery rule, and it deliberately ignores quiet
+  hours (freeze protection wins).
+* **Quiet Time tab** — the genset's per-day quiet window (a genset-side setting). The app's own
+  protection rules intentionally ignore it: deep-discharge and freeze protection outrank quiet hours.
+* **History tab** — an **activity log** (every start/stop/fault with *what caused it*: manual,
+  voltage rule, temp rule, schedule, or the genset/panel itself) recorded by the server, plus the
+  genset's stored fault log (timestamp + decoded fault name) and the current active fault. Fault
+  names/descriptions come from `faultcodes.py`.
+* **Stats tab** — house-voltage and SOC history charts with generator-run bands, plus runtime and
+  start counts per range (24h / 7d / 30d / all). Sampled once a minute while connected into a local
+  SQLite file (`stats.db`), kept ~180 days, downsampled server-side so charts stay light. Charting is
+  vendored Chart.js served locally, so it works fully offline.
 * **Settings tab (⚙)** — choose which telemetry rows appear on the Control tab; the rest stay hidden
   until you want them (saved per-browser in localStorage). Defaults show the common stuff; "Show all"
   reveals manifold/oil/inverter temps, averaged voltages, engine hours, etc. for troubleshooting.
