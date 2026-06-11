@@ -37,6 +37,7 @@ STATE_PATH = os.path.join(HERE, "state.json")    # remembers last device + autoc
 TEMPCTL_PATH = os.path.join(HERE, "tempctl.json")  # cold-start (heater) temperature rule
 SOCCTL_PATH = os.path.join(HERE, "socctl.json")    # low-house-SOC auto start/stop rule
 STATS_PATH = os.path.join(HERE, "stats.db")        # telemetry history (SQLite) for the Stats tab
+PRIMECTL_PATH = os.path.join(HERE, "primectl.json")  # opt-in manual fuel-prime feature
 
 # ----------------------------------------------------------------------------- devices store
 def load_devices():
@@ -204,7 +205,7 @@ async def api_state():
     return {"state": mgr.state, "error": mgr.error, "address": mgr.address,
             "name": mgr.name, "telemetry": (mgr.ags.telemetry if mgr.ags else {}),
             "autoconnect": mgr.autoconnect, "last": load_state().get("last"),
-            "automation_enabled": automation_enabled()}
+            "automation_enabled": automation_enabled(), "priming": load_primectl()}
 
 class AutomationReq(BaseModel):
     enabled: bool
@@ -293,15 +294,19 @@ async def api_disconnect():
 
 COMMANDS = {
     "start": ag.RPC_START_GEN, "stop": ag.RPC_STOP_GEN, "status": ag.RPC_GEN_STATUS,
-    "preheat": ag.RPC_PREHEAT_GEN, "prime-start": ag.RPC_PRIME_START,
-    "prime-stop": ag.RPC_PRIME_STOP, "auto-on": ag.RPC_AUTO_ON, "auto-off": ag.RPC_AUTO_OFF,
+    "preheat": ag.RPC_PREHEAT_GEN, "auto-on": ag.RPC_AUTO_ON, "auto-off": ag.RPC_AUTO_OFF,
     "reset-fault": ag.RPC_RESETFAULT,
 }
+# NOTE: raw prime-start/prime-stop are intentionally NOT exposed here — an unguarded prime-start
+# leaves the fuel pump running until a separate stop. Use the bounded POST /api/prime instead.
 
 @app.post("/api/command/{cmd}")
 async def api_command(cmd: str):
     if cmd not in COMMANDS:
         raise HTTPException(400, f"unknown command {cmd}")
+    global _prime_cancel
+    if cmd == "stop" and _priming:
+        _prime_cancel = True            # abort an in-progress prime (and its pending start)
     await mgr.op(lambda ags: ags.send_rpc(COMMANDS[cmd]))
     if cmd in ("start", "stop"):
         note_command(cmd, "manual")                 # watcher attributes the resulting state change
@@ -386,6 +391,7 @@ class Schedule(BaseModel):
     device: str                     # saved device address to act on
     time: str                       # "HH:MM" (24h, local time on this machine)
     days: list[int]                 # 0=Mon .. 6=Sun
+    prime: bool = False             # if a "start", fuel-prime first (only when priming is enabled)
 
 _sched_fired = {}   # entry id -> "YYYY-MM-DDTHH:MM" of last fire (dedupe within a minute)
 _sched_log = []     # recent fire results, newest last
@@ -400,10 +406,15 @@ async def _scheduler_fire(entry):
     # Make sure we're connected to the right device, then send.
     if not (mgr.state == "connected" and mgr.address == addr):
         await mgr.connect(addr, saved.get("password", ""), saved.get("name"))
-    async with mgr.lock:
-        ags = mgr.require()
-        await ags.send_rpc(COMMANDS[entry["action"]])
-    note_command(entry["action"], "schedule")
+    act = entry["action"]
+    if (act == "start" and entry.get("prime") and load_primectl().get("enabled")
+            and _gen_state() == "Stopped"):
+        await _do_prime(then_start=True, cause="schedule")   # prime first, then start
+    else:
+        async with mgr.lock:
+            ags = mgr.require()
+            await ags.send_rpc(COMMANDS[act])
+        note_command(act, "schedule")
 
 async def scheduler_loop():
     while True:
@@ -806,6 +817,94 @@ async def api_voltctl_set(r: VoltRule):
         raise HTTPException(400, "stop_above must be greater than start_below (need a hysteresis gap)")
     save_voltctl(r.model_dump())
     return {"ok": True}
+
+# ----------------------------------------------------------------------------- manual fuel prime
+# A bounded, server-driven fuel prime (opt-in via Settings). The official app primes only while you
+# HOLD its button (mirroring the physical switch) and never auto-starts; replicating a hold over HTTP
+# is unreliable and could leave the fuel pump running, so instead we prime for a fixed, capped number
+# of seconds with the STOP guaranteed in a finally, then optionally START. Only valid when stopped,
+# and never invoked by the auto rules. Use case: clear air from the lines after the genset has run dry
+# or sat unused, when a plain start would just crank without catching.
+PRIMECTL_DEFAULT = {"enabled": False, "duration_sec": 5}
+PRIME_MAX_SEC = 60
+
+def load_primectl():
+    try:
+        with open(PRIMECTL_PATH) as f:
+            return {**PRIMECTL_DEFAULT, **json.load(f)}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(PRIMECTL_DEFAULT)
+
+def save_primectl(c):
+    _atomic_write(PRIMECTL_PATH, c)
+
+class PrimeRule(BaseModel):
+    enabled: bool = False
+    duration_sec: int = 5
+
+class PrimeReq(BaseModel):
+    then_start: bool = False
+
+_priming = False
+_prime_cancel = False
+
+def _gen_state():
+    return (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
+
+async def _do_prime(then_start, cause, detail=""):
+    """Run the bounded prime sequence; assumes the caller verified preconditions (connected, stopped,
+    enabled). PRIME_STOP is guaranteed via finally so the pump never stays on. Aborts (and skips the
+    start) if _prime_cancel is set — e.g. the user hits Stop mid-prime."""
+    global _priming, _prime_cancel
+    dur = max(1, min(int(load_primectl().get("duration_sec", 5)), PRIME_MAX_SEC))
+    _priming, _prime_cancel = True, False
+    try:
+        async with mgr.lock:
+            ags = mgr.require()
+            await ags.send_rpc(ag.RPC_PRIME_START)
+        await log_event("prime", cause, f"{dur}s")
+        waited = 0.0
+        while waited < dur and not _prime_cancel:    # poll cancel so Stop can abort promptly
+            await asyncio.sleep(0.5)
+            waited += 0.5
+    finally:
+        try:
+            async with mgr.lock:
+                if mgr.ags:
+                    await mgr.ags.send_rpc(ag.RPC_PRIME_STOP)
+        except Exception:
+            pass
+        _priming = False
+    if then_start and not _prime_cancel:
+        async with mgr.lock:
+            ags = mgr.require()
+            await ags.send_rpc(ag.RPC_START_GEN)
+        note_command("start", cause, detail or "after prime")
+    return {"ok": True, "cancelled": _prime_cancel, "duration_sec": dur,
+            "started": bool(then_start and not _prime_cancel)}
+
+@app.get("/api/primectl")
+async def api_primectl_get():
+    return load_primectl()
+
+@app.post("/api/primectl")
+async def api_primectl_set(r: PrimeRule):
+    if not (1 <= r.duration_sec <= PRIME_MAX_SEC):
+        raise HTTPException(400, f"duration_sec must be 1..{PRIME_MAX_SEC}")
+    save_primectl(r.model_dump())
+    return {"ok": True}
+
+@app.post("/api/prime")
+async def api_prime(r: PrimeReq):
+    if not load_primectl().get("enabled"):
+        raise HTTPException(403, "priming is disabled (enable it in Settings)")
+    if mgr.state != "connected" or not mgr.ags:
+        raise HTTPException(409, "not connected")
+    if _priming:
+        raise HTTPException(409, "already priming")
+    if _gen_state() != "Stopped":
+        raise HTTPException(409, "can only prime while the generator is stopped")
+    return await _do_prime(r.then_start, "manual")
 
 # ----------------------------------------------------------------------------- telemetry history (Stats)
 # Log house voltage / SOC / run-state to SQLite every minute so the Stats tab can chart trends and

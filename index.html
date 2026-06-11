@@ -110,6 +110,10 @@
         <button class="act red" onclick="cmd('stop')" id="stopBtn">Stop</button>
         <button class="act ghost" onclick="cmd('reset-fault')">Reset Fault</button>
       </div>
+      <div class="btns" id="primeBtns" style="justify-content:center;margin-top:10px;display:none">
+        <button class="act ghost" onclick="prime(false)" id="primeBtn">Prime</button>
+        <button class="act green" onclick="prime(true)" id="primeStartBtn">Prime + Start</button>
+      </div>
       <label class="row" style="justify-content:center;gap:10px;margin-top:14px;cursor:pointer">
         <span class="k">App automation</span>
         <span class="switch"><input type="checkbox" id="autoSwitch" onchange="setAutomation(this.checked)"><span class="slider"></span></span>
@@ -206,6 +210,8 @@
       <label>Device</label><select id="s_device"></select>
       <label>Days</label>
       <div id="s_days" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px"></div>
+      <label class="row" id="s_prime_row" style="cursor:pointer;margin-top:10px;display:none">
+        <span class="k">Prime before starting</span><input type="checkbox" id="s_prime"></label>
       <div class="btns" style="margin-top:14px"><button class="act" onclick="addSchedule()">Add schedule</button></div>
     </div>
     <div class="card">
@@ -332,6 +338,22 @@
   <!-- SETTINGS -->
   <section class="tab" id="tab-settings">
     <div class="card">
+      <h3 style="margin-top:0">Priming</h3>
+      <p class="muted" style="margin-top:0">Enable a manual fuel-prime control (Prime / Prime + Start appear
+        on the Control tab). Use it to clear air from the fuel lines after the generator has run dry or sat
+        unused, when a plain start would just crank without catching. Server-side — applies to every browser
+        and to scheduled starts. The prime runs for the set time then stops automatically.</p>
+      <div class="row"><label style="margin:0">Enable priming</label><input type="checkbox" id="pr_en"></div>
+      <div class="grid">
+        <div><label>Prime duration (seconds)</label><input type="number" id="pr_dur" min="1" max="60"></div>
+        <div></div>
+      </div>
+      <div class="btns" style="margin-top:14px">
+        <button class="act" onclick="savePrimeCtl()">Save</button>
+        <button class="act ghost" onclick="loadPrimeCtl()">Reload</button>
+      </div>
+    </div>
+    <div class="card">
       <div class="row"><h3 style="margin:0">Telemetry to show</h3>
         <span><button class="act ghost" onclick="setAllMetrics(true)">Show all</button>
               <button class="act ghost" onclick="resetMetrics()">Defaults</button></span></div>
@@ -367,7 +389,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==='history'){ loadEvents(); if(connected) loadHistory(); }
   if(b.dataset.tab==='stats') loadStats();
   if(b.dataset.tab==='temp'){ if(connected) loadAuto(); loadTempCtl(); }
-  if(b.dataset.tab==='settings') renderSettings();
+  if(b.dataset.tab==='settings'){ renderSettings(); loadPrimeCtl(); }
 });
 
 async function loadTempCtl(){
@@ -408,6 +430,25 @@ async function saveVoltCtl(){
     start_below:parseFloat($('#v_below').value), stop_above:parseFloat($('#v_above').value),
     min_run_min:parseInt($('#v_minrun').value||'45') };
   try{ await api('POST','/api/voltctl',body); toast('voltage rule saved ✓'); loadVoltCtl(); }
+  catch(e){ toast('✗ '+e.message); }
+}
+
+// ---- Manual fuel prime ----
+async function prime(thenStart){
+  if(busy) return; busy=true;
+  toast(thenStart?'priming, then starting…':'priming…');
+  try{ const r=await api('POST','/api/prime',{then_start:thenStart});
+       toast(r.cancelled?'prime cancelled':(r.started?'primed + started ✓':'primed ✓')); }
+  catch(e){ toast('✗ '+e.message); } finally{ busy=false; }
+}
+async function loadPrimeCtl(){
+  try{ const c=await api('GET','/api/primectl');
+       $('#pr_en').checked=!!c.enabled; $('#pr_dur').value=c.duration_sec;
+  }catch(e){ toast('✗ '+e.message); }
+}
+async function savePrimeCtl(){
+  const body={ enabled:$('#pr_en').checked, duration_sec:parseInt($('#pr_dur').value||'5') };
+  try{ await api('POST','/api/primectl',body); toast('priming settings saved ✓'); loadPrimeCtl(); poll(); }
   catch(e){ toast('✗ '+e.message); }
 }
 
@@ -487,6 +528,14 @@ async function poll(){
     $('#errBanner').textContent = s.error?('⚠ '+s.error):'';
     $('#noConnHint').style.display = connected?'none':'block';
     ['startBtn','stopBtn'].forEach(id=>$('#'+id).disabled=!connected);
+    // Prime controls: only shown when priming is enabled (Settings), only usable while stopped
+    const pr = s.priming||{}, gstate = (s.telemetry&&s.telemetry.status||{}).state;
+    $('#primeBtns').style.display = pr.enabled ? 'flex' : 'none';
+    if(pr.enabled){
+      $('#primeBtn').textContent = 'Prime ('+(pr.duration_sec||5)+'s)';
+      const canPrime = connected && gstate==='Stopped';
+      $('#primeBtn').disabled = !canPrime; $('#primeStartBtn').disabled = !canPrime;
+    }
     // App-automation master is a server-side setting (works regardless of BLE) — reflect it live
     if(!busy){ $('#autoSwitch').checked = !!s.automation_enabled;
                $('#autoState').textContent = s.automation_enabled?'ON':'OFF'; }
@@ -589,7 +638,7 @@ function setAllMetrics(on){ METRICS.forEach(m=>visible[m.k]=on); saveVisible(); 
 function resetMetrics(){ METRICS.forEach(m=>visible[m.k]=m.def); saveVisible(); buildMetrics(); renderSettings(); }
 
 const EV_LABEL = { started:'▶ Started', stopped:'■ Stopped', auto_on:'⚙ Genset auto ON',
-                   auto_off:'⚙ Genset auto OFF', fault:'⚠ Fault',
+                   auto_off:'⚙ Genset auto OFF', fault:'⚠ Fault', prime:'⛽ Prime',
                    automation_on:'⚙ App automation ON', automation_off:'⚙ App automation OFF' };
 const EV_COLOR = { started:'var(--green)', fault:'var(--red)' };
 const CAUSE_LABEL = { voltage_rule:'voltage rule', temp_rule:'temp rule', schedule:'schedule',
@@ -741,6 +790,9 @@ async function saveQuiet(){
 }
 
 // schedule
+function updatePrimeRow(){
+  $('#s_prime_row').style.display = (window._primingEnabled && $('#s_action').value==='start') ? 'flex' : 'none';
+}
 async function refreshSchedules(){
   // populate device dropdown from saved devices
   try{
@@ -749,13 +801,15 @@ async function refreshSchedules(){
       ? devs.map(d=>`<option value="${d.address}">${d.name||d.address}</option>`).join('')
       : '<option value="">(save a device first)</option>';
   }catch(e){}
+  try{ const pc=await api('GET','/api/primectl'); window._primingEnabled=!!pc.enabled; }catch(e){}
+  updatePrimeRow();
   try{
     const r = await api('GET','/api/schedules');
     $('#schedList').innerHTML = r.schedules.length ? r.schedules.map(s=>{
       const days = s.days.map(i=>DAYS[i]).join(' ');
       return `<div class="dev"><div class="meta">
         <b>${s.action==='start'?'▶ Start':'■ Stop'}</b> at <b>${s.time}</b><br>
-        <small>${days||'no days'} · ${s.device}</small></div>
+        <small>${days||'no days'} · ${s.device}${s.prime?' · primes first':''}</small></div>
         <label class="pill" style="color:var(--fg)"><input type="checkbox" ${s.enabled?'checked':''}
            onchange='toggleSchedule(${JSON.stringify(s)},this.checked)' style="width:14px;height:14px"> on</label>
         <button class="act ghost" onclick="delSchedule('${s.id}')">✕</button></div>`;
@@ -769,12 +823,15 @@ async function addSchedule(){
   if(!dev){ toast('save a device first'); return; }
   if(!time){ toast('pick a time'); return; }
   if(!days.length){ toast('pick at least one day'); return; }
-  try{ await api('POST','/api/schedules',{action:$('#s_action').value,device:dev,time,days,enabled:true});
+  const action=$('#s_action').value;
+  const prime = action==='start' && !!window._primingEnabled && $('#s_prime').checked;
+  try{ await api('POST','/api/schedules',{action,device:dev,time,days,enabled:true,prime});
        toast('schedule added ✓'); refreshSchedules(); }catch(e){ toast('✗ '+e.message); }
 }
 async function toggleSchedule(s,on){ s.enabled=on; await api('POST','/api/schedules',s); refreshSchedules(); }
 async function delSchedule(id){ await api('DELETE','/api/schedules/'+id); refreshSchedules(); }
 
+$('#s_action').addEventListener('change', updatePrimeRow);
 buildMetrics(); refreshSaved(); poll(); setInterval(poll, 2000);
 </script>
 </body>
