@@ -93,6 +93,7 @@
   <button data-tab="quiet">Quiet Time</button>
   <button data-tab="schedule">Schedule</button>
   <button data-tab="history">History</button>
+  <button data-tab="maint">Maintenance</button>
   <button data-tab="stats">Stats</button>
   <button data-tab="devices">Devices</button>
   <button data-tab="settings">⚙</button>
@@ -306,6 +307,26 @@
     </div>
   </section>
 
+  <!-- MAINTENANCE -->
+  <section class="tab" id="tab-maint">
+    <div class="card">
+      <h3 style="margin-top:0">Add maintenance note</h3>
+      <p class="muted" style="margin-top:0">A manual service logbook — oil, filters, plugs, etc. Engine
+        hours are captured automatically when the generator is reporting them; you can also edit the hours
+        or back-date an entry.</p>
+      <div class="grid">
+        <div><label>Date</label><input type="date" id="m_date"></div>
+        <div><label>Engine hours</label><input type="number" id="m_hours" min="0" placeholder="—"></div>
+      </div>
+      <label>Note</label><input type="text" id="m_note" placeholder="e.g. Added oil" maxlength="200">
+      <div class="btns" style="margin-top:14px"><button class="act" onclick="addMaintenance()">Add note</button></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Service log</h3>
+      <div id="maintList" class="muted">Loading…</div>
+    </div>
+  </section>
+
   <!-- STATS -->
   <section class="tab" id="tab-stats">
     <div class="rng" id="statsRange">
@@ -368,6 +389,7 @@
 <script src="/static/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
+const escapeHtml = s => (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let connected = false, busy = false, load_devices_cache = {};
 
 function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
@@ -387,6 +409,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==='devices') refreshSaved();
   if(b.dataset.tab==='schedule') refreshSchedules();
   if(b.dataset.tab==='history'){ loadEvents(); if(connected) loadHistory(); }
+  if(b.dataset.tab==='maint') loadMaintenance();
   if(b.dataset.tab==='stats') loadStats();
   if(b.dataset.tab==='temp'){ if(connected) loadAuto(); loadTempCtl(); }
   if(b.dataset.tab==='settings'){ renderSettings(); loadPrimeCtl(); }
@@ -565,6 +588,7 @@ const METRICS = [
   {k:'start_v_l', g:'Batteries', label:'Start V (long avg)',  src:'dcvolts', f:'engine_v_long', u:'V', def:false},
   {k:'fault',     g:'Status', label:'Fault code',          src:'status', f:'fault_code',   fmt:'fault', def:true},
   {k:'run',       g:'Status', label:'Run time (this start)',src:'status', f:'last_started', fmt:'run',   def:true},
+  {k:'ehours',    g:'Status', label:'Engine hours',         src:'readings', f:'engine_hours', u:'h',  def:false},
   {k:'laststart', g:'Status', label:'Last started',        src:'status', f:'last_started', fmt:'date',  def:false},
   {k:'quiet',     g:'Status', label:'Quiet time active',   src:'status', f:'quiet_time',   fmt:'bool',  def:false},
   // --- UNTESTED: reported 0xFF / "not available" on tested hardware; decode unverified ---
@@ -572,7 +596,6 @@ const METRICS = [
   {k:'load',    label:'Load',              src:'readings', f:'load_%',         u:'%',  unt:true, def:false},
   {k:'cur',     label:'Load current',      src:'readings', f:'load_current_a', u:'A',  unt:true, def:false},
   {k:'rpm',     label:'Engine RPM',        src:'readings', f:'engine_rpm',             unt:true, def:false},
-  {k:'ehours',  label:'Engine hours',      src:'readings', f:'engine_hours',   u:'h',  unt:true, def:false},
   {k:'etemp',   label:'Engine temp',       src:'readings', f:'engine_temp',            unt:true, def:false},
   {k:'oil',     label:'Oil temp',          src:'mondata',  f:'oil_temp',               unt:true, def:false},
   {k:'manp',    label:'Manifold pressure', src:'mondata',  f:'manifold_pressure',      unt:true, def:false},
@@ -683,6 +706,39 @@ async function loadHistory(){
   }
   finally{ $('#histBtn').disabled=false; }
 }
+
+// ---- Maintenance log ----
+async function loadMaintenance(){
+  $('#maintList').innerHTML='<span class="muted">Loading…</span>';
+  if(!$('#m_date').value) $('#m_date').value = new Date().toISOString().slice(0,10);
+  try{
+    const d=await api('GET','/api/maintenance');
+    if(d.current_hours!=null && !$('#m_hours').value) $('#m_hours').value = d.current_hours;
+    const notes = d.notes||[];
+    // "+N h since previous logged entry": walk oldest→newest over entries that have hours
+    const withH = notes.filter(n=>n.hours!=null).slice().reverse();
+    const deltaById = {};
+    for(let i=1;i<withH.length;i++) deltaById[withH[i].id] = withH[i].hours - withH[i-1].hours;
+    $('#maintList').innerHTML = notes.length
+      ? notes.map(n=>{
+          const h = n.hours!=null ? ` <span class="muted">@ ${n.hours} h</span>` : '';
+          const dl = deltaById[n.id]!=null ? ` <span class="muted">(+${deltaById[n.id]} h)</span>` : '';
+          return `<div class="row"><span class="k">${n.date}</span>
+            <span class="v" style="font-weight:500">${escapeHtml(n.note)}${h}${dl}
+            <button class="act ghost" style="padding:3px 8px;font-size:12px;margin-left:8px" onclick="delMaintenance('${n.id}')">✕</button></span></div>`;
+        }).join('')
+      : '<span class="muted">No maintenance logged yet. Add oil changes, filter swaps, etc. above.</span>';
+  }catch(e){ $('#maintList').textContent='✗ '+e.message; }
+}
+async function addMaintenance(){
+  const note=$('#m_note').value.trim(), date=$('#m_date').value, hv=$('#m_hours').value;
+  if(!note){ toast('enter a note'); return; }
+  const body={ note, date:date||null, hours: hv===''?null:parseInt(hv) };
+  try{ await api('POST','/api/maintenance',body); toast('note added ✓');
+       $('#m_note').value=''; $('#m_hours').value=''; loadMaintenance(); }
+  catch(e){ toast('✗ '+e.message); }
+}
+async function delMaintenance(id){ await api('DELETE','/api/maintenance/'+id); loadMaintenance(); }
 
 async function cmd(c){
   if(busy) return; busy=true;

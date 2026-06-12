@@ -1093,6 +1093,61 @@ async def api_stats(range: str = "24h"):
     now_vals = {"house_v": dc.get("house_v"), "soc": st.get("soc_house_%"), "state": st.get("state")}
     return {"range": range, "bucket_sec": iv, "series": series, "summary": summary, "now": now_vals}
 
+# ----------------------------------------------------------------------------- maintenance log
+# A user-entered service logbook (oil, filters, plugs, etc.) — manual notes only, distinct from the
+# auto activity log. The tested genset doesn't report engine hours, so this is date + free text, and
+# back-dating is allowed. Stored in maintenance.json (gitignored — personal rig data, not for the repo).
+MAINT_PATH = os.path.join(HERE, "maintenance.json")
+
+def load_maintenance():
+    try:
+        with open(MAINT_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_maintenance(m):
+    _atomic_write(MAINT_PATH, m)
+
+class MaintNote(BaseModel):
+    note: str
+    date: str | None = None        # "YYYY-MM-DD"; defaults to today if omitted
+    hours: int | None = None       # engine hours at service; if omitted, captured from live telemetry
+
+def _current_engine_hours():
+    """Live engine-hour meter from the readings characteristic, or None if not being reported."""
+    return (mgr.ags.telemetry.get("readings") or {}).get("engine_hours") if mgr.ags else None
+
+@app.get("/api/maintenance")
+async def api_maint_list():
+    notes = sorted(load_maintenance(), key=lambda n: (n.get("date", ""), n.get("created", "")),
+                   reverse=True)
+    return {"notes": notes, "current_hours": _current_engine_hours()}
+
+@app.post("/api/maintenance")
+async def api_maint_add(m: MaintNote):
+    note = (m.note or "").strip()
+    if not note:
+        raise HTTPException(400, "note can't be empty")
+    if len(note) > 200:
+        raise HTTPException(400, "note too long (200 char max)")
+    date = (m.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+    hours = m.hours if m.hours is not None else _current_engine_hours()   # auto-capture if not given
+    if hours is not None and not (0 <= hours <= 100000):
+        raise HTTPException(400, "hours out of range")
+    notes = load_maintenance()
+    notes.append({"id": uuid.uuid4().hex[:8], "date": date, "note": note, "hours": hours,
+                  "created": datetime.now().isoformat(timespec="seconds")})
+    save_maintenance(notes)
+    return {"ok": True}
+
+@app.delete("/api/maintenance/{nid}")
+async def api_maint_del(nid: str):
+    save_maintenance([n for n in load_maintenance() if n.get("id") != nid])
+    return {"ok": True}
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     with open(os.path.join(HERE, "index.html")) as f:
