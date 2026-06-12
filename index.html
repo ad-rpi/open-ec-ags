@@ -312,8 +312,8 @@
     <div class="card">
       <h3 style="margin-top:0">Add maintenance note</h3>
       <p class="muted" style="margin-top:0">A manual service logbook — oil, filters, plugs, etc. Engine
-        hours are captured automatically when the generator is reporting them; you can also edit the hours
-        or back-date an entry.</p>
+        hours auto-fill only if your gateway reports them over BLE (many, including the tested unit, don't —
+        so type them from the genset's own hour meter). Edit the date to back-date an entry.</p>
       <div class="grid">
         <div><label>Date</label><input type="date" id="m_date"></div>
         <div><label>Engine hours</label><input type="number" id="m_hours" min="0" placeholder="—"></div>
@@ -588,7 +588,6 @@ const METRICS = [
   {k:'start_v_l', g:'Batteries', label:'Start V (long avg)',  src:'dcvolts', f:'engine_v_long', u:'V', def:false},
   {k:'fault',     g:'Status', label:'Fault code',          src:'status', f:'fault_code',   fmt:'fault', def:true},
   {k:'run',       g:'Status', label:'Run time (this start)',src:'status', f:'last_started', fmt:'run',   def:true},
-  {k:'ehours',    g:'Status', label:'Engine hours',         src:'readings', f:'engine_hours', u:'h',  def:false},
   {k:'laststart', g:'Status', label:'Last started',        src:'status', f:'last_started', fmt:'date',  def:false},
   {k:'quiet',     g:'Status', label:'Quiet time active',   src:'status', f:'quiet_time',   fmt:'bool',  def:false},
   // --- UNTESTED: reported 0xFF / "not available" on tested hardware; decode unverified ---
@@ -596,6 +595,7 @@ const METRICS = [
   {k:'load',    label:'Load',              src:'readings', f:'load_%',         u:'%',  unt:true, def:false},
   {k:'cur',     label:'Load current',      src:'readings', f:'load_current_a', u:'A',  unt:true, def:false},
   {k:'rpm',     label:'Engine RPM',        src:'readings', f:'engine_rpm',             unt:true, def:false},
+  {k:'ehours',  label:'Engine hours',      src:'readings', f:'engine_hours',   u:'h',  unt:true, def:false},
   {k:'etemp',   label:'Engine temp',       src:'readings', f:'engine_temp',            unt:true, def:false},
   {k:'oil',     label:'Oil temp',          src:'mondata',  f:'oil_temp',               unt:true, def:false},
   {k:'manp',    label:'Manifold pressure', src:'mondata',  f:'manifold_pressure',      unt:true, def:false},
