@@ -311,9 +311,9 @@
   <section class="tab" id="tab-maint">
     <div class="card">
       <h3 style="margin-top:0">Add maintenance note</h3>
-      <p class="muted" style="margin-top:0">A manual service logbook — oil, filters, plugs, etc. Engine
-        hours auto-fill only if your gateway reports them over BLE (many, including the tested unit, don't —
-        so type them from the genset's own hour meter). Edit the date to back-date an entry.</p>
+      <p class="muted" style="margin-top:0">A manual service logbook — oil, filters, plugs, etc. Hours are
+        optional: type them from the genset's hour meter for hour-based service (oil, etc.), or leave blank
+        for things that don't track hours (e.g. "Removed wasp nest"). Edit the date to back-date an entry.</p>
       <div class="grid">
         <div><label>Date</label><input type="date" id="m_date"></div>
         <div><label>Engine hours</label><input type="number" id="m_hours" min="0" placeholder="—"></div>
@@ -713,7 +713,6 @@ async function loadMaintenance(){
   if(!$('#m_date').value) $('#m_date').value = new Date().toISOString().slice(0,10);
   try{
     const d=await api('GET','/api/maintenance');
-    if(d.current_hours!=null && !$('#m_hours').value) $('#m_hours').value = d.current_hours;
     const notes = d.notes||[];
     // "+N h since previous logged entry": walk oldest→newest over entries that have hours
     const withH = notes.filter(n=>n.hours!=null).slice().reverse();

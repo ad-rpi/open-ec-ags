@@ -1112,17 +1112,13 @@ def save_maintenance(m):
 class MaintNote(BaseModel):
     note: str
     date: str | None = None        # "YYYY-MM-DD"; defaults to today if omitted
-    hours: int | None = None       # engine hours at service; if omitted, captured from live telemetry
-
-def _current_engine_hours():
-    """Live engine-hour meter from the readings characteristic, or None if not being reported."""
-    return (mgr.ags.telemetry.get("readings") or {}).get("engine_hours") if mgr.ags else None
+    hours: int | None = None       # engine hours at service; optional (not every note needs it)
 
 @app.get("/api/maintenance")
 async def api_maint_list():
     notes = sorted(load_maintenance(), key=lambda n: (n.get("date", ""), n.get("created", "")),
                    reverse=True)
-    return {"notes": notes, "current_hours": _current_engine_hours()}
+    return {"notes": notes}
 
 @app.post("/api/maintenance")
 async def api_maint_add(m: MaintNote):
@@ -1134,11 +1130,10 @@ async def api_maint_add(m: MaintNote):
     date = (m.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
         raise HTTPException(400, "date must be YYYY-MM-DD")
-    hours = m.hours if m.hours is not None else _current_engine_hours()   # auto-capture if not given
-    if hours is not None and not (0 <= hours <= 100000):
+    if m.hours is not None and not (0 <= m.hours <= 100000):
         raise HTTPException(400, "hours out of range")
     notes = load_maintenance()
-    notes.append({"id": uuid.uuid4().hex[:8], "date": date, "note": note, "hours": hours,
+    notes.append({"id": uuid.uuid4().hex[:8], "date": date, "note": note, "hours": m.hours,
                   "created": datetime.now().isoformat(timespec="seconds")})
     save_maintenance(notes)
     return {"ok": True}
