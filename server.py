@@ -840,6 +840,16 @@ async def api_voltctl_set(r: VoltRule):
     save_voltctl(r.model_dump())
     return {"ok": True}
 
+@app.get("/api/changelog")
+async def api_changelog():
+    """Serve the human-curated CHANGELOG.md so the Settings tab can show users what's changed
+    without making them dig through the repo or git history."""
+    try:
+        with open(os.path.join(HERE, "CHANGELOG.md"), encoding="utf-8") as f:
+            return {"markdown": f.read()}
+    except FileNotFoundError:
+        return {"markdown": "# Changelog\n\nNo changelog available yet."}
+
 # ----------------------------------------------------------------------------- manual fuel prime
 # A bounded, server-driven fuel prime (opt-in via Settings). The official app primes only while you
 # HOLD its button (mirroring the physical switch) and never auto-starts; replicating a hold over HTTP

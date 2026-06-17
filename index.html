@@ -384,6 +384,11 @@
       <p class="muted" style="margin-top:0">Pick what appears on the Control tab. Saved in this browser.</p>
       <div id="settingsBody"></div>
     </div>
+    <div class="card">
+      <h3 style="margin-top:0">What's changed</h3>
+      <p class="muted" style="margin-top:0">Recent updates to the dashboard, newest first.</p>
+      <div id="changelogBody" class="muted">Loading…</div>
+    </div>
   </section>
 </main>
 <div id="toast"></div>
@@ -415,7 +420,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==='maint') loadMaintenance();
   if(b.dataset.tab==='stats') loadStats();
   if(b.dataset.tab==='temp'){ if(connected) loadAuto(); loadTempCtl(); }
-  if(b.dataset.tab==='settings'){ renderSettings(); loadPrimeCtl(); }
+  if(b.dataset.tab==='settings'){ renderSettings(); loadPrimeCtl(); loadChangelog(); }
 });
 
 async function loadTempCtl(){
@@ -642,6 +647,24 @@ function renderTelemetry(t){
   $('#genSub').textContent = '';   // app automation state is shown on the toggle (set from /api/state in poll)
   updateMetrics(t);
 }
+async function loadChangelog(){
+  const el = $('#changelogBody');
+  try{
+    const c = await api('GET','/api/changelog');
+    el.innerHTML = renderMarkdown(c.markdown || '');
+  }catch(e){ el.textContent = '✗ '+e.message; }
+}
+// tiny, safe markdown-lite: escape everything first, then format headers / bullets / **bold**
+function renderMarkdown(md){
+  return escapeHtml(md).split('\n').map(raw=>{
+    const line = raw.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
+    if(/^#{1,6}\s/.test(raw)) return '<h4 style="margin:14px 0 4px">'+raw.replace(/^#{1,6}\s+/,'').replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')+'</h4>';
+    if(/^\s*[-*]\s/.test(raw)) return '<div style="margin:2px 0 2px 14px">• '+line.replace(/^\s*[-*]\s+/,'')+'</div>';
+    if(raw.trim()==='') return '<div style="height:8px"></div>';
+    return '<div>'+line+'</div>';
+  }).join('');
+}
+
 function renderSettings(){
   const row = m => `<label class="row" style="cursor:pointer"><span class="k">${m.label}</span>
         <input type="checkbox" ${visible[m.k]?'checked':''} onchange="toggleMetric('${m.k}',this.checked)"></label>`;
