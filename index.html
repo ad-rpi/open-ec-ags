@@ -140,10 +140,13 @@
         <div><label>Start below (V)</label><input type="number" step="0.1" id="v_below"></div>
         <div><label>Stop above (V)</label><input type="number" step="0.1" id="v_above"></div>
         <div><label>Min run time (minutes)</label><input type="number" id="v_minrun"></div>
-        <div></div>
+        <div><label>Min off / cooldown (minutes)</label><input type="number" id="v_minoff"></div>
       </div>
       <div class="muted" style="margin-top:8px">House voltage now: <b id="v_cur">—</b> &nbsp;·&nbsp;
-        rule active: <b id="v_active">—</b><br>
+        rule active: <b id="v_active">—</b> &nbsp;·&nbsp; cooldown: <b id="v_cool">—</b><br>
+        After any stop (rule, manual, or safety) the rule waits the cooldown before it can auto-start
+        again — this stops it short-cycling on a battery whose voltage rebounds the instant the genset
+        quits, and keeps it from re-cranking something you (or a safety cutoff) just shut off.<br>
         Voltage rises fast under charge and can't see tail current, so <b>Stop above</b> is a rough "full"
         proxy — set it to a voltage your converter actually reaches (watch the live reading) and lean on
         min run time for real charge duration. Needs a gap (stop &gt; start) so it doesn't flap.</div>
@@ -443,15 +446,17 @@ async function loadVoltCtl(){
     $('#v_below').value = c.start_below;
     $('#v_above').value = c.stop_above;
     $('#v_minrun').value = c.min_run_min;
+    $('#v_minoff').value = c.min_off_min;
     $('#v_cur').textContent = (c.current_v==null ? '—' : c.current_v.toFixed(2)+' V');
     $('#v_active').textContent = c.rule_active ? 'yes — genset started by rule' : 'no';
+    $('#v_cool').textContent = (c.cooldown_sec>0) ? Math.ceil(c.cooldown_sec/60)+' min left' : 'ready';
     $('#v_log').textContent = (c.log && c.log.length) ? c.log.join('\n') : '—';
   }catch(e){ toast('✗ '+e.message); }
 }
 async function saveVoltCtl(){
   const body={ enabled:$('#v_en').checked,
     start_below:parseFloat($('#v_below').value), stop_above:parseFloat($('#v_above').value),
-    min_run_min:parseInt($('#v_minrun').value||'45') };
+    min_run_min:parseInt($('#v_minrun').value||'45'), min_off_min:parseInt($('#v_minoff').value||'20') };
   try{ await api('POST','/api/voltctl',body); toast('voltage rule saved ✓'); loadVoltCtl(); }
   catch(e){ toast('✗ '+e.message); }
 }

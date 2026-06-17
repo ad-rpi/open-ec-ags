@@ -724,7 +724,8 @@ async def api_socctl_set(r: SocRule):
 # rough "full" proxy — set stop_above to a voltage the converter actually reaches, and lean on min-run for
 # real absorption time. (True SOC would want a coulomb-counting shunt; see the lithium-era plan.)
 VOLTCTL_PATH = os.path.join(HERE, "voltctl.json")
-VOLTCTL_DEFAULT = {"enabled": False, "start_below": 12.2, "stop_above": 14.4, "min_run_min": 45}
+VOLTCTL_DEFAULT = {"enabled": False, "start_below": 12.2, "stop_above": 14.4,
+                   "min_run_min": 45, "min_off_min": 20}
 
 def load_voltctl():
     try:
@@ -741,10 +742,15 @@ class VoltRule(BaseModel):
     start_below: float              # start genset when house volts <= this (V)
     stop_above: float               # stop when house volts >= this (must be > start_below)
     min_run_min: int = 45           # don't stop until it's run this long (anti short-cycle + charge time)
+    min_off_min: int = 20           # after a stop (ours OR external), wait this long before auto-starting
+                                    # again — kills surface-charge re-trigger thrash, lets V settle to a
+                                    # true resting reading, and stops the rule fighting a manual/safety stop
 
 _volt_log = []
 _volt_started = False               # did THIS rule start the genset? (only-stop-what-we-started)
 _volt_start_ts = None
+_volt_stop_ts = None                # last running→stopped moment; gates the min-off cooldown
+_volt_prev_running = False          # to detect running→stopped transitions (ours or external)
 
 def _log_volt(msg):
     _volt_log.append(f"{datetime.now().strftime('%Y-%m-%dT%H:%M')}  {msg}")
@@ -765,18 +771,27 @@ def _house_volts(avg=False):
     return dc.get("house_v")
 
 async def volt_control_loop():
-    global _volt_started, _volt_start_ts
+    global _volt_started, _volt_start_ts, _volt_stop_ts, _volt_prev_running
     while True:
         try:
             cfg = load_voltctl()
             if cfg.get("enabled") and automation_enabled() and mgr.state == "connected":
                 state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
                 running = state in RUN_CYCLE_STATES
+                # any running→stopped transition (our stop OR an external/manual/safety stop) opens the
+                # off-cooldown — so we don't re-crank on the surface-charge collapse and don't fight a
+                # human (or interlock) that just shut it down.
+                if _volt_prev_running and not running:
+                    _volt_stop_ts = datetime.now()
+                _volt_prev_running = running
                 v_start = _house_volts(avg=True)   # smoothed — rides through transient load sag
                 v_now = _house_volts()             # instant — responsive to the charge voltage rising
                 sb, sa = cfg["start_below"], cfg["stop_above"]
                 minrun = cfg.get("min_run_min", 45) * 60
-                if v_start is not None and v_start <= sb and not running and not _volt_started:
+                minoff = cfg.get("min_off_min", 20) * 60
+                cooled = (_volt_stop_ts is None
+                          or (datetime.now() - _volt_stop_ts).total_seconds() >= minoff)
+                if v_start is not None and v_start <= sb and not running and not _volt_started and cooled:
                     try:
                         async with mgr.lock:
                             await mgr.require().send_rpc(ag.RPC_START_GEN)
@@ -791,15 +806,17 @@ async def volt_control_loop():
                         try:
                             async with mgr.lock:
                                 await mgr.require().send_rpc(ag.RPC_STOP_GEN)
-                            _volt_started, _volt_start_ts = False, None
+                            _volt_started, _volt_start_ts, _volt_stop_ts = False, None, datetime.now()
                             _log_volt(f"STOP — house {v_now:.2f}V ≥ {sa}V")
                             note_command("stop", "voltage_rule", f"house {v_now:.2f}V ≥ {sa}V")
                         except Exception as ex:
                             _log_volt(f"stop FAILED: {ex}")
-                # we think we started it, but it's not running → someone else stopped it; let go
+                # we think we started it, but it's not running → someone else stopped it, or the start
+                # never took (e.g. a safety cutoff killed the fuel pump). Let go AND start the cooldown,
+                # so we don't hammer the starter retrying every cycle.
                 if (_volt_started and not running and _volt_start_ts
                         and (datetime.now() - _volt_start_ts).total_seconds() > 90):
-                    _volt_started, _volt_start_ts = False, None
+                    _volt_started, _volt_start_ts, _volt_stop_ts = False, None, datetime.now()
                     _log_volt("released (genset stopped externally)")
         except Exception:
             pass
@@ -807,9 +824,14 @@ async def volt_control_loop():
 
 @app.get("/api/voltctl")
 async def api_voltctl_get():
-    return {**load_voltctl(), "current_v": _house_volts(),
+    cfg = load_voltctl()
+    cooldown_sec = 0
+    if _volt_stop_ts is not None:
+        cooldown_sec = max(0, int(cfg.get("min_off_min", 20) * 60
+                                  - (datetime.now() - _volt_stop_ts).total_seconds()))
+    return {**cfg, "current_v": _house_volts(),
             "running": ((mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None),
-            "rule_active": _volt_started, "log": _volt_log[-15:]}
+            "rule_active": _volt_started, "cooldown_sec": cooldown_sec, "log": _volt_log[-15:]}
 
 @app.post("/api/voltctl")
 async def api_voltctl_set(r: VoltRule):
