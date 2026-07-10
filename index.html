@@ -115,6 +115,14 @@
         <button class="act ghost" onclick="prime(false)" id="primeBtn">Prime</button>
         <button class="act green" onclick="prime(true)" id="primeStartBtn">Prime + Start</button>
       </div>
+      <div class="muted" style="margin-top:14px;font-size:13px">Quick run — warms up, then shuts down properly</div>
+      <div class="btns" id="quickRunBtns" style="justify-content:center;margin-top:4px">
+        <button class="act ghost" onclick="quickRun(15)">15 min</button>
+        <button class="act ghost" onclick="quickRun(30)">30 min</button>
+        <button class="act ghost" onclick="quickRun(45)">45 min</button>
+        <button class="act ghost" onclick="quickRun(60)">60 min</button>
+      </div>
+      <div class="muted" id="quickRunStatus" style="margin-top:6px;display:none"></div>
       <label class="row" style="justify-content:center;gap:10px;margin-top:14px;cursor:pointer">
         <span class="k">App automation</span>
         <span class="switch"><input type="checkbox" id="autoSwitch" onchange="setAutomation(this.checked)"><span class="slider"></span></span>
@@ -409,6 +417,7 @@ async function api(method, path, body){
   if(!r.ok){ const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||r.statusText); }
   return r.headers.get('content-type')?.includes('json') ? r.json() : r.text();
 }
+const fmtClock = ts => ts ? new Date(ts*1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '—';
 
 // tabs
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
@@ -575,6 +584,16 @@ async function poll(){
       const canPrime = connected && gstate==='Stopped';
       $('#primeBtn').disabled = !canPrime; $('#primeStartBtn').disabled = !canPrime;
     }
+    // Quick run: timed run that warms up then stops itself with a proper shutdown
+    const qr = s.quickrun||{};
+    document.querySelectorAll('#quickRunBtns button').forEach(b=> b.disabled = !connected);
+    const qEl = $('#quickRunStatus');
+    if(qr.active){
+      const m=Math.floor(qr.remaining_sec/60), ss=String(qr.remaining_sec%60).padStart(2,'0');
+      qEl.style.display='block';
+      qEl.innerHTML = `⏱ Auto-stop in <b>${m}:${ss}</b> (≈${fmtClock(qr.until_ts)}) `
+        + `<button class="act ghost" style="padding:2px 8px;font-size:12px;margin-left:6px" onclick="cancelQuickRun()">Cancel</button>`;
+    } else { qEl.style.display='none'; }
     // App-automation master is a server-side setting (works regardless of BLE) — reflect it live
     if(!busy){ $('#autoSwitch').checked = !!s.automation_enabled;
                $('#autoState').textContent = s.automation_enabled?'ON':'OFF'; }
@@ -699,7 +718,7 @@ const EV_LABEL = { started:'▶ Started', stopped:'■ Stopped', auto_on:'⚙ Ge
                    automation_on:'⚙ App automation ON', automation_off:'⚙ App automation OFF' };
 const EV_COLOR = { started:'var(--green)', fault:'var(--red)' };
 const CAUSE_LABEL = { voltage_rule:'voltage rule', temp_rule:'temp rule', schedule:'schedule',
-                      manual:'manual', 'manual/genset':'manual / genset', genset:'genset' };
+                      quick_run:'quick run', manual:'manual', 'manual/genset':'manual / genset', genset:'genset' };
 async function loadEvents(){
   $('#activityList').innerHTML='<span class="muted">Loading…</span>';
   try{
@@ -777,6 +796,19 @@ async function cmd(c){
   if(busy) return; busy=true;
   try{ const r = await api('POST','/api/command/'+c); toast(r&&r.noop ? (c+' ignored — '+r.noop) : (c+' sent ✓')); }
   catch(e){ toast('✗ '+e.message); } finally{ busy=false; }
+}
+async function quickRun(minutes){
+  if(busy) return; busy=true;
+  try{ const r = await api('POST','/api/quickrun',{minutes});
+       toast(r.noop ? ('quick run — '+r.noop)
+           : r.extended ? ('quick run set to '+minutes+' min ✓')
+           : (minutes+' min quick run started ✓')); }
+  catch(e){ toast('✗ '+e.message); } finally{ busy=false; poll(); }
+}
+async function cancelQuickRun(){
+  if(busy) return; busy=true;
+  try{ await api('DELETE','/api/quickrun'); toast('auto-stop cancelled — still running'); }
+  catch(e){ toast('✗ '+e.message); } finally{ busy=false; poll(); }
 }
 async function setAutomation(on){
   if(busy) return; busy=true;

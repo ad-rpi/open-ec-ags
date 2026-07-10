@@ -19,7 +19,7 @@ import shutil
 import sqlite3
 import subprocess
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from bleak import BleakClient, BleakScanner
 from fastapi import FastAPI, HTTPException
@@ -205,7 +205,8 @@ async def api_state():
     return {"state": mgr.state, "error": mgr.error, "address": mgr.address,
             "name": mgr.name, "telemetry": (mgr.ags.telemetry if mgr.ags else {}),
             "autoconnect": mgr.autoconnect, "last": load_state().get("last"),
-            "automation_enabled": automation_enabled(), "priming": load_primectl()}
+            "automation_enabled": automation_enabled(), "priming": load_primectl(),
+            "quickrun": _quickrun_status()}
 
 class AutomationReq(BaseModel):
     enabled: bool
@@ -477,6 +478,7 @@ async def _on_startup():
     asyncio.create_task(volt_control_loop())
     asyncio.create_task(stats_sampler_loop())
     asyncio.create_task(event_watch_loop())
+    asyncio.create_task(quickrun_loop())
 
 class AutoConnectReq(BaseModel):
     enabled: bool
@@ -946,6 +948,105 @@ async def api_prime(r: PrimeReq):
     if _gen_state() != "Stopped":
         raise HTTPException(409, "can only prime while the generator is stopped")
     return await _do_prime(r.then_start, "manual")
+
+# ----------------------------------------------------------------------------- quick run (timed)
+# One-tap timed runs from the Control tab: start now, run for a fixed number of minutes, then issue a
+# NORMAL stop (RPC_STOP_GEN, so the controller runs its usual cool-down) — never a hard kill. The point is
+# convenience WITHOUT a "not fully warm" shutdown: the shortest preset is the warm-up floor below, so a
+# quick run structurally can't be a damaging cold-short-cycle. Manual (user-initiated), so unlike the auto
+# rules it is NOT gated by automation_enabled or quiet hours; it goes through the normal start path, so a
+# safety lockout (e.g. no CO sensor → interlock cuts the fuel pump) simply keeps it from running and the
+# loop drops the timer. State is in-memory like the auto rules: a server restart mid-run drops the stop
+# timer, leaving the genset running until a rule or manual stop — acceptable for a short attended run, and
+# the voltage rule (if enabled) still backstops it.
+QUICKRUN_MIN_MIN = 15   # warm-up floor: never allow a run short enough to be a cold-short-cycle
+QUICKRUN_MAX_MIN = 240
+
+_quickrun_until = None       # datetime the timed run should stop, or None when no quick run is armed
+_quickrun_started_ts = None  # when the current quick run began (grace window for "did the start take?")
+_quickrun_min = None         # requested minutes, for display
+_quickrun_log = []
+
+class QuickRunReq(BaseModel):
+    minutes: int
+
+def _log_quickrun(msg):
+    _quickrun_log.append(f"{datetime.now().strftime('%Y-%m-%dT%H:%M')}  {msg}")
+    del _quickrun_log[:-50]
+
+def _quickrun_status():
+    if _quickrun_until is None:
+        return {"active": False}
+    remaining = max(0, int((_quickrun_until - datetime.now()).total_seconds()))
+    return {"active": True, "minutes": _quickrun_min, "remaining_sec": remaining,
+            "until_ts": int(_quickrun_until.timestamp())}
+
+@app.post("/api/quickrun")
+async def api_quickrun(r: QuickRunReq):
+    global _quickrun_until, _quickrun_started_ts, _quickrun_min
+    if not (QUICKRUN_MIN_MIN <= r.minutes <= QUICKRUN_MAX_MIN):
+        raise HTTPException(400, f"minutes must be {QUICKRUN_MIN_MIN}..{QUICKRUN_MAX_MIN}")
+    if mgr.state != "connected" or not mgr.ags:
+        raise HTTPException(409, "not connected")
+    running = _gen_state() in RUN_CYCLE_STATES
+    until = datetime.now() + timedelta(minutes=r.minutes)
+    if running and _quickrun_until is not None:
+        # already on a quick run → just re-arm the timer (extend or shorten it)
+        _quickrun_until, _quickrun_min = until, r.minutes
+        _log_quickrun(f"timer re-armed to {r.minutes} min")
+        return {"ok": True, "extended": True, "minutes": r.minutes}
+    if running:
+        # running for some other reason (a rule, the panel, a plain start) → don't impose a stop timer on it
+        return {"ok": True, "noop": "already running (not a quick run) — stop it first or let it finish"}
+    try:
+        async with mgr.lock:
+            await mgr.require().send_rpc(ag.RPC_START_GEN)
+    except Exception as e:
+        raise HTTPException(502, f"start failed: {e}")
+    _quickrun_until, _quickrun_started_ts, _quickrun_min = until, datetime.now(), r.minutes
+    note_command("start", "quick_run", f"{r.minutes} min")
+    _log_quickrun(f"START — {r.minutes} min")
+    return {"ok": True, "started": True, "minutes": r.minutes}
+
+@app.delete("/api/quickrun")
+async def api_quickrun_cancel():
+    """Cancel the pending auto-stop but leave the genset running (you'll stop it yourself). To stop now,
+    use the normal Stop — it shuts down properly, and the loop clears the now-stale timer."""
+    global _quickrun_until, _quickrun_started_ts, _quickrun_min
+    was = _quickrun_until is not None
+    _quickrun_until, _quickrun_started_ts, _quickrun_min = None, None, None
+    if was:
+        _log_quickrun("auto-stop cancelled (left running)")
+    return {"ok": True, "cancelled": was}
+
+async def quickrun_loop():
+    global _quickrun_until, _quickrun_started_ts, _quickrun_min
+    while True:
+        try:
+            if _quickrun_until is not None and mgr.state == "connected" and mgr.ags:
+                running = _gen_state() in RUN_CYCLE_STATES
+                now = datetime.now()
+                if now >= _quickrun_until:
+                    if running:
+                        try:
+                            async with mgr.lock:
+                                await mgr.require().send_rpc(ag.RPC_STOP_GEN)  # normal stop → controller cool-down
+                            note_command("stop", "quick_run", "timer elapsed")
+                            _log_quickrun("STOP — timer elapsed")
+                        except Exception as ex:
+                            _log_quickrun(f"stop FAILED: {ex}")
+                    else:
+                        _log_quickrun("timer elapsed — already stopped")
+                    _quickrun_until, _quickrun_started_ts, _quickrun_min = None, None, None
+                elif (not running and _quickrun_started_ts
+                      and (now - _quickrun_started_ts).total_seconds() > 90):
+                    # start never took (safety cutoff / no CO sensor) or it was stopped externally → drop the
+                    # timer so it can't fire on some later run
+                    _quickrun_until, _quickrun_started_ts, _quickrun_min = None, None, None
+                    _log_quickrun("released (genset not running)")
+        except Exception:
+            pass
+        await asyncio.sleep(10)
 
 # ----------------------------------------------------------------------------- telemetry history (Stats)
 # Log house voltage / SOC / run-state to SQLite every minute so the Stats tab can chart trends and
