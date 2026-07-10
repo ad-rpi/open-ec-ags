@@ -333,6 +333,9 @@
   <!-- STATS -->
   <section class="tab" id="tab-stats">
     <div class="rng" id="statsRange">
+      <button data-r="4h">4h</button>
+      <button data-r="8h">8h</button>
+      <button data-r="12h">12h</button>
       <button data-r="24h" class="active">24h</button>
       <button data-r="7d">7d</button>
       <button data-r="30d">30d</button>
@@ -560,9 +563,12 @@ async function poll(){
     $('#errBanner').style.display = s.error?'block':'none';
     $('#errBanner').textContent = s.error?('⚠ '+s.error):'';
     $('#noConnHint').style.display = connected?'none':'block';
-    ['startBtn','stopBtn'].forEach(id=>$('#'+id).disabled=!connected);
+    const gstate = (s.telemetry&&s.telemetry.status||{}).state;
+    const runningish = ['Running','Cranking','Priming'].includes(gstate);
+    $('#startBtn').disabled = !connected || runningish;   // don't offer Start while it's already running
+    $('#stopBtn').disabled  = !connected;                 // keep Stop usable (it also cancels an in-progress prime)
     // Prime controls: only shown when priming is enabled (Settings), only usable while stopped
-    const pr = s.priming||{}, gstate = (s.telemetry&&s.telemetry.status||{}).state;
+    const pr = s.priming||{};
     $('#primeBtns').style.display = pr.enabled ? 'flex' : 'none';
     if(pr.enabled){
       $('#primeBtn').textContent = 'Prime ('+(pr.duration_sec||5)+'s)';
@@ -769,7 +775,7 @@ async function delMaintenance(id){ await api('DELETE','/api/maintenance/'+id); l
 
 async function cmd(c){
   if(busy) return; busy=true;
-  try{ await api('POST','/api/command/'+c); toast(c+' sent'); }
+  try{ const r = await api('POST','/api/command/'+c); toast(r&&r.noop ? (c+' ignored — '+r.noop) : (c+' sent ✓')); }
   catch(e){ toast('✗ '+e.message); } finally{ busy=false; }
 }
 async function setAutomation(on){

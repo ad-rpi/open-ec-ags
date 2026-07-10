@@ -304,6 +304,13 @@ COMMANDS = {
 async def api_command(cmd: str):
     if cmd not in COMMANDS:
         raise HTTPException(400, f"unknown command {cmd}")
+    # Don't fire a redundant start: the controller ignores a start while it's already in a run cycle, but
+    # sending it anyway logs a spurious manual-start hint (which the event watcher then mis-attributes) and
+    # falsely confirms "sent." No-op cleanly so the UI can say "already running" instead.
+    if cmd == "start":
+        state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
+        if state in RUN_CYCLE_STATES:
+            return {"ok": True, "noop": "already running"}
     global _prime_cancel
     if cmd == "stop" and _priming:
         _prime_cancel = True            # abort an in-progress prime (and its pending start)
@@ -757,14 +764,16 @@ def _log_volt(msg):
     del _volt_log[:-50]
 
 def _house_volts(avg=False):
-    """House-battery voltage (V) from DC-volts telemetry, or None. avg=True returns the genset's smoothed
-    value (long→short avg) for the START decision so a momentary load sag can't false-trigger a run;
-    falls back to the instant reading when no average is reported."""
+    """House-battery voltage (V) from DC-volts telemetry, or None. avg=True returns the genset's SHORT
+    moving average for the START decision — debounced enough that a single-sample blip can't false-trigger,
+    but responsive to a genuine sustained sag. (The long avg lagged so far behind a weak, wobbling bank that
+    real lows never crossed the threshold — instant would read 11.9 while long sat at 12.3.) Falls back to
+    the long avg, then the instant reading, if the short average isn't reported."""
     if not mgr.ags:
         return None
     dc = mgr.ags.telemetry.get("dcvolts") or {}
     if avg:
-        for k in ("house_v_long", "house_v_short", "house_v"):
+        for k in ("house_v_short", "house_v_long", "house_v"):
             if dc.get(k) is not None:
                 return dc[k]
         return None
@@ -944,7 +953,7 @@ async def api_prime(r: PrimeReq):
 # raw samples for STATS_RETENTION_DAYS and downsample server-side per query so charts stay light.
 STATS_SAMPLE_SEC = 60
 STATS_RETENTION_DAYS = 180
-STATS_RANGES = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "all": None}
+STATS_RANGES = {"4h": 4*3600, "8h": 8*3600, "12h": 12*3600, "24h": 86400, "7d": 7*86400, "30d": 30*86400, "all": None}
 
 def _stats_db():
     conn = sqlite3.connect(STATS_PATH, timeout=5.0)
