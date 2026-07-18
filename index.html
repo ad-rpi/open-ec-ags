@@ -106,6 +106,7 @@
     <div class="card" style="text-align:center">
       <div class="big" id="genState">—</div>
       <div class="muted" id="genSub"></div>
+      <div class="muted" id="runFuel" style="margin-top:6px;display:none"></div>
       <div class="btns" style="justify-content:center;margin-top:14px">
         <button class="act green" onclick="cmd('start')" id="startBtn">Start</button>
         <button class="act red" onclick="cmd('stop')" id="stopBtn">Stop</button>
@@ -388,6 +389,7 @@
           <label>Burn <input id="fuelGph" type="number" step="0.01" style="width:70px"> gal/hr</label>
           <label>Tank <input id="fuelTank" type="number" step="1" style="width:70px"> gal</label>
           <label>Cutoff <input id="fuelReservePct" type="number" step="1" style="width:60px"> %</label>
+          <label>$ <input id="fuelPrice" type="number" step="0.01" placeholder="/gal" style="width:70px"> /gal</label>
           <button class="act ghost" onclick="fuelSaveConfig()">Save</button>
         </div>
         <p class="muted" style="margin:8px 0 0;font-size:12px">Measured ~0.43 gal/hr; default 0.45 pads the
@@ -540,6 +542,7 @@ async function renderFuel(){
   $('#fuelGph').value = f.gal_per_hr;
   $('#fuelTank').value = f.tank_gal;
   $('#fuelReservePct').value = Math.round(f.reserve_frac*100);
+  $('#fuelPrice').value = f.gas_price ?? '';
   $('#fuelReserveMark').style.left = (f.reserve_frac*100)+'%';
   const pct = f.remaining_gal==null ? 0 : Math.max(0, Math.min(100, f.remaining_gal/f.tank_gal*100));
   $('#fuelFill').style.width = pct+'%';
@@ -549,11 +552,12 @@ async function renderFuel(){
     $('#fuelSummary').innerHTML = 'No fill logged yet — tap <b>Filled to full</b> '+
       '(or set a level off the dash gauge) to start the estimate.';
   } else {
-    $('#fuelSummary').innerHTML =
-      `≈ <b>${f.remaining_gal}</b> / ${f.tank_gal} gal in tank · `+
+    let html = `≈ <b>${f.remaining_gal}</b> / ${f.tank_gal} gal in tank · `+
       `<b>${f.usable_gal}</b> gal usable before the ¼ cutoff · `+
-      `~<b>${f.hours_left==null?'—':f.hours_left} h</b> runtime left. `+
-      `<span class="muted">(at ${f.gal_per_hr} gal/hr; ${f.used_since_fill_gal} gal used since last fill)</span>`;
+      `~<b>${f.hours_left==null?'—':f.hours_left} h</b> runtime left.`;
+    if(f.cost_since_fill!=null) html += ` <b>$${f.cost_since_fill}</b> since fill (~$${f.cost_per_day}/day).`;
+    html += ` <span class="muted">(at ${f.gal_per_hr} gal/hr; ${f.used_since_fill_gal} gal used since fill)</span>`;
+    $('#fuelSummary').innerHTML = html;
   }
 }
 async function fuelFillUp(){
@@ -567,9 +571,11 @@ async function fuelSetLevel(){
   catch(e){ toast('✗ '+e.message); }
 }
 async function fuelSaveConfig(){
+  const pv = parseFloat($('#fuelPrice').value);
   const body = { gal_per_hr: parseFloat($('#fuelGph').value),
                  tank_gal: parseFloat($('#fuelTank').value),
-                 reserve_frac: (parseFloat($('#fuelReservePct').value)||0)/100 };
+                 reserve_frac: (parseFloat($('#fuelReservePct').value)||0)/100,
+                 gas_price: isNaN(pv) ? null : pv };
   try{ await api('POST','/api/fuel',body); toast('✓ Saved'); renderFuel(); }
   catch(e){ toast('✗ '+e.message); }
 }
@@ -662,6 +668,12 @@ async function poll(){
       qEl.innerHTML = `⏱ Auto-stop in <b>${m}:${ss}</b> (≈${fmtClock(qr.until_ts)}) `
         + `<button class="act ghost" style="padding:2px 8px;font-size:12px;margin-left:6px" onclick="cancelQuickRun()">Cancel</button>`;
     } else { qEl.style.display='none'; }
+    // Current-run fuel estimate — shown only while running
+    const fr = s.fuel_run, frEl = $('#runFuel');
+    if(fr){ frEl.style.display='block';
+      frEl.innerHTML = `⛽ This run: ≈ <b>${fr.gal}</b> gal · ${fmtRun(fr.sec)}`
+        + (fr.cost!=null ? ` · $${fr.cost}` : ''); }
+    else { frEl.style.display='none'; }
     // App-automation master is a server-side setting (works regardless of BLE) — reflect it live
     if(!busy){ $('#autoSwitch').checked = !!s.automation_enabled;
                $('#autoState').textContent = s.automation_enabled?'ON':'OFF'; }

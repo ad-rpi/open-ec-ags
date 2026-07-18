@@ -206,7 +206,7 @@ async def api_state():
             "name": mgr.name, "telemetry": (mgr.ags.telemetry if mgr.ags else {}),
             "autoconnect": mgr.autoconnect, "last": load_state().get("last"),
             "automation_enabled": automation_enabled(), "priming": load_primectl(),
-            "quickrun": _quickrun_status()}
+            "quickrun": _quickrun_status(), "fuel_run": _current_run_fuel()}
 
 class AutomationReq(BaseModel):
     enabled: bool
@@ -1275,7 +1275,7 @@ async def api_stats(range: str = "24h"):
 # re-anchor with "filled up" (or set a level off the dash gauge) after fueling.
 FUELCTL_PATH = os.path.join(HERE, "fuelctl.json")
 FUELCTL_DEFAULT = {"gal_per_hr": 0.45, "tank_gal": 55.0, "reserve_frac": 0.25,
-                   "fill_gal": 55.0, "fill_ts": None}
+                   "fill_gal": 55.0, "fill_ts": None, "gas_price": None}
 
 def load_fuelctl():
     try:
@@ -1291,6 +1291,7 @@ class FuelConfig(BaseModel):
     gal_per_hr: float
     tank_gal: float
     reserve_frac: float = 0.25      # genset starves at this fraction (physical pickup) → drive-away reserve
+    gas_price: float | None = None  # $/gal; None hides the cost readouts
 
 class FuelFill(BaseModel):
     gal: float | None = None        # current tank level in gal; None = filled to full (tank_gal)
@@ -1307,9 +1308,11 @@ def _db_run_seconds_since(ts_from):
 async def _fuel_status():
     cfg = load_fuelctl()
     gph, tank, rf = cfg["gal_per_hr"], cfg["tank_gal"], cfg["reserve_frac"]
+    price = cfg.get("gas_price")
     reserve_gal = round(tank * rf, 1)
     out = {**cfg, "reserve_gal": reserve_gal, "used_since_fill_gal": None,
-           "remaining_gal": None, "usable_gal": None, "hours_left": None}
+           "remaining_gal": None, "usable_gal": None, "hours_left": None,
+           "cost_since_fill": None, "cost_per_day": None}
     if cfg.get("fill_ts"):
         run_sec = await asyncio.to_thread(_db_run_seconds_since, cfg["fill_ts"])
         used = run_sec / 3600.0 * gph
@@ -1318,7 +1321,25 @@ async def _fuel_status():
         out.update({"used_since_fill_gal": round(used, 1), "remaining_gal": round(remaining, 1),
                     "usable_gal": round(usable, 1),
                     "hours_left": round(usable / gph, 1) if gph > 0 else None})
+        if price:
+            days = max(1 / 24.0, (int(datetime.now().timestamp()) - int(cfg["fill_ts"])) / 86400.0)
+            out["cost_since_fill"] = round(used * price, 2)
+            out["cost_per_day"] = round(used * price / days, 2)
     return out
+
+def _current_run_fuel():
+    """Estimated fuel burned so far in the CURRENT run, or None if not running. Uses the genset's own
+    last-started timestamp (no DB) so it's cheap enough for the 2s state poll."""
+    if not mgr.ags:
+        return None
+    st = mgr.ags.telemetry.get("status") or {}
+    if st.get("state") not in RUN_CYCLE_STATES or not st.get("last_started"):
+        return None
+    sec = max(0, int(datetime.now().timestamp()) - int(st["last_started"]))
+    cfg = load_fuelctl()
+    gal = sec / 3600.0 * cfg["gal_per_hr"]
+    return {"sec": sec, "gal": round(gal, 2),
+            "cost": round(gal * cfg["gas_price"], 2) if cfg.get("gas_price") else None}
 
 @app.get("/api/fuel")
 async def api_fuel_get():
@@ -1332,8 +1353,11 @@ async def api_fuel_set(c: FuelConfig):
         raise HTTPException(400, "tank_gal must be 0..200")
     if not 0 <= c.reserve_frac < 1:
         raise HTTPException(400, "reserve_frac must be 0..1")
+    if c.gas_price is not None and not 0 < c.gas_price < 20:
+        raise HTTPException(400, "gas_price must be 0..20")
     cfg = load_fuelctl()
-    cfg.update({"gal_per_hr": c.gal_per_hr, "tank_gal": c.tank_gal, "reserve_frac": c.reserve_frac})
+    cfg.update({"gal_per_hr": c.gal_per_hr, "tank_gal": c.tank_gal, "reserve_frac": c.reserve_frac,
+                "gas_price": c.gas_price})
     if cfg.get("fill_gal") is not None:              # a smaller tank can't hold more than its capacity
         cfg["fill_gal"] = min(cfg["fill_gal"], c.tank_gal)
     save_fuelctl(cfg)
