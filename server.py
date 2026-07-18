@@ -548,6 +548,7 @@ class ExternalTemp(BaseModel):
 _temp_log = []
 _temp_started = False               # did THIS rule start the genset? (only-stop-what-we-started)
 _temp_start_ts = None
+_temp_prev_running = False          # detect running→stopped transitions (release ownership promptly)
 _external_temp = None
 _external_temp_ts = None
 
@@ -568,7 +569,7 @@ def _current_temp():
     return None
 
 async def temp_control_loop():
-    global _temp_started, _temp_start_ts
+    global _temp_started, _temp_start_ts, _temp_prev_running
     while True:
         try:
             cfg = load_tempctl()
@@ -576,6 +577,11 @@ async def temp_control_loop():
                 temp = _current_temp()
                 state = (mgr.ags.telemetry.get("status") or {}).get("state") if mgr.ags else None
                 running = state in RUN_CYCLE_STATES
+                if _temp_prev_running and not running:
+                    # was running under us, now stopped → release ownership immediately (don't wait
+                    # the 90s never-took grace) so a fresh start can't inherit a stale timestamp.
+                    _temp_started, _temp_start_ts = False, None
+                _temp_prev_running = running
                 if temp is not None:
                     sb, sa = cfg["start_below"], cfg["stop_above"]
                     minrun = cfg.get("min_run_min", 20) * 60
@@ -604,6 +610,10 @@ async def temp_control_loop():
                         and (datetime.now() - _temp_start_ts).total_seconds() > 90):
                     _temp_started, _temp_start_ts = False, None
                     _log_temp("released (genset stopped externally)")
+            elif _temp_started:
+                # not actively managing (rule disabled / automation off / disconnected): own nothing.
+                _temp_started, _temp_start_ts, _temp_prev_running = False, None, False
+                _log_temp("released (rule/automation inactive)")
         except Exception:
             pass
         await asyncio.sleep(30)
@@ -794,6 +804,10 @@ async def volt_control_loop():
                 # human (or interlock) that just shut it down.
                 if _volt_prev_running and not running:
                     _volt_stop_ts = datetime.now()
+                    # the run we owned is over → release ownership NOW instead of waiting out the 90s
+                    # never-took grace below, so a fresh start (quick-run/manual/schedule) inside that
+                    # window can't inherit a stale _volt_start_ts and be stopped mid-warm-up.
+                    _volt_started, _volt_start_ts = False, None
                 _volt_prev_running = running
                 v_start = _house_volts(avg=True)   # smoothed — rides through transient load sag
                 v_now = _house_volts()             # instant — responsive to the charge voltage rising
@@ -829,6 +843,12 @@ async def volt_control_loop():
                         and (datetime.now() - _volt_start_ts).total_seconds() > 90):
                     _volt_started, _volt_start_ts, _volt_stop_ts = False, None, datetime.now()
                     _log_volt("released (genset stopped externally)")
+            elif _volt_started:
+                # not actively managing (rule disabled / automation off / disconnected): we own
+                # nothing. Drop stale ownership so re-enabling automation can't stop a run started
+                # meanwhile (e.g. a quick-run) using a stale start-timestamp — the reported bug.
+                _volt_started, _volt_start_ts, _volt_prev_running = False, None, False
+                _log_volt("released (rule/automation inactive)")
         except Exception:
             pass
         await asyncio.sleep(30)
