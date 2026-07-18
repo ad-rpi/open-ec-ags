@@ -465,20 +465,29 @@ async def autoconnect_loop():
             pass
         await asyncio.sleep(15)
 
+_bg_tasks = []      # background loops, tracked so shutdown can cancel them cleanly (no "Task was
+                    # destroyed but it is pending!" on restart — matters for the Pi/systemd future)
+
 @app.on_event("startup")
 async def _on_startup():
     mgr.autoconnect = load_state().get("autoconnect", True)
-    asyncio.create_task(scheduler_loop())
-    asyncio.create_task(autoconnect_loop())
-    asyncio.create_task(temp_control_loop())
+    _bg_tasks.append(asyncio.create_task(scheduler_loop()))
+    _bg_tasks.append(asyncio.create_task(autoconnect_loop()))
+    _bg_tasks.append(asyncio.create_task(temp_control_loop()))
     # SOC rule retired in favour of the voltage rule below (single battery authority). The loop +
     # endpoints are kept for the lithium-era revert (flat LFP curve → SOC+shunt beats voltage); re-add
     # this line and its UI card then. Not registering it means a stale socctl.json can't reactivate it.
-    # asyncio.create_task(soc_control_loop())
-    asyncio.create_task(volt_control_loop())
-    asyncio.create_task(stats_sampler_loop())
-    asyncio.create_task(event_watch_loop())
-    asyncio.create_task(quickrun_loop())
+    # _bg_tasks.append(asyncio.create_task(soc_control_loop()))
+    _bg_tasks.append(asyncio.create_task(volt_control_loop()))
+    _bg_tasks.append(asyncio.create_task(stats_sampler_loop()))
+    _bg_tasks.append(asyncio.create_task(event_watch_loop()))
+    _bg_tasks.append(asyncio.create_task(quickrun_loop()))
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    for t in _bg_tasks:
+        t.cancel()
+    await asyncio.gather(*_bg_tasks, return_exceptions=True)     # let each unwind its CancelledError
 
 class AutoConnectReq(BaseModel):
     enabled: bool
@@ -1155,6 +1164,7 @@ def _db_query_stats(now, span):
                            (start,)).fetchone()[0]
         summary["v_avg"] = round(avg, 2) if avg is not None else None
         summary["last_start_ts"] = (last_start_ts * 1000) if last_start_ts else None
+        summary["fuel_gal"] = round(summary["runtime_sec"] / 3600.0 * load_fuelctl()["gal_per_hr"], 1)
     finally:
         conn.close()
     return iv, series, summary
@@ -1254,6 +1264,90 @@ async def api_stats(range: str = "24h"):
     dc = (mgr.ags.telemetry.get("dcvolts") or {}) if mgr.ags else {}
     now_vals = {"house_v": dc.get("house_v"), "soc": st.get("soc_house_%"), "state": st.get("state")}
     return {"range": range, "bucket_sec": iv, "series": series, "summary": summary, "now": now_vals}
+
+# ----------------------------------------------------------------------------- fuel-use estimate
+# There's no fuel-level sensor on this rig (the genset's ¼-tank cutoff is a physical fuel-pickup height,
+# not telemetry), so fuel is ESTIMATED from logged run-time × a calibrated burn rate. The default rate is
+# padded deliberately high (measured ~0.43 gal/hr → 0.45) so the estimate over-reports burn and
+# under-reports what's left — it errs toward "less fuel than you think," never toward stranding you.
+# Descriptive, not authoritative: your physical fuel check stays ground truth. Caveat: the run-time log
+# only accrues while the server is up, so genset runs with the dashboard off are invisible and undercount;
+# re-anchor with "filled up" (or set a level off the dash gauge) after fueling.
+FUELCTL_PATH = os.path.join(HERE, "fuelctl.json")
+FUELCTL_DEFAULT = {"gal_per_hr": 0.45, "tank_gal": 55.0, "reserve_frac": 0.25,
+                   "fill_gal": 55.0, "fill_ts": None}
+
+def load_fuelctl():
+    try:
+        with open(FUELCTL_PATH) as f:
+            return {**FUELCTL_DEFAULT, **json.load(f)}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(FUELCTL_DEFAULT)
+
+def save_fuelctl(c):
+    _atomic_write(FUELCTL_PATH, c)
+
+class FuelConfig(BaseModel):
+    gal_per_hr: float
+    tank_gal: float
+    reserve_frac: float = 0.25      # genset starves at this fraction (physical pickup) → drive-away reserve
+
+class FuelFill(BaseModel):
+    gal: float | None = None        # current tank level in gal; None = filled to full (tank_gal)
+
+def _db_run_seconds_since(ts_from):
+    """Total logged run-time (seconds) since a unix ts — each running sample counts one sample interval."""
+    conn = _stats_db()
+    try:
+        row = conn.execute("SELECT SUM(running) FROM samples WHERE ts >= ?", (int(ts_from),)).fetchone()
+    finally:
+        conn.close()
+    return (row[0] or 0) * STATS_SAMPLE_SEC
+
+async def _fuel_status():
+    cfg = load_fuelctl()
+    gph, tank, rf = cfg["gal_per_hr"], cfg["tank_gal"], cfg["reserve_frac"]
+    reserve_gal = round(tank * rf, 1)
+    out = {**cfg, "reserve_gal": reserve_gal, "used_since_fill_gal": None,
+           "remaining_gal": None, "usable_gal": None, "hours_left": None}
+    if cfg.get("fill_ts"):
+        run_sec = await asyncio.to_thread(_db_run_seconds_since, cfg["fill_ts"])
+        used = run_sec / 3600.0 * gph
+        remaining = max(0.0, cfg.get("fill_gal", tank) - used)
+        usable = max(0.0, remaining - reserve_gal)
+        out.update({"used_since_fill_gal": round(used, 1), "remaining_gal": round(remaining, 1),
+                    "usable_gal": round(usable, 1),
+                    "hours_left": round(usable / gph, 1) if gph > 0 else None})
+    return out
+
+@app.get("/api/fuel")
+async def api_fuel_get():
+    return await _fuel_status()
+
+@app.post("/api/fuel")
+async def api_fuel_set(c: FuelConfig):
+    if not 0 < c.gal_per_hr < 5:
+        raise HTTPException(400, "gal_per_hr must be 0..5")
+    if not 0 < c.tank_gal <= 200:
+        raise HTTPException(400, "tank_gal must be 0..200")
+    if not 0 <= c.reserve_frac < 1:
+        raise HTTPException(400, "reserve_frac must be 0..1")
+    cfg = load_fuelctl()
+    cfg.update({"gal_per_hr": c.gal_per_hr, "tank_gal": c.tank_gal, "reserve_frac": c.reserve_frac})
+    if cfg.get("fill_gal") is not None:              # a smaller tank can't hold more than its capacity
+        cfg["fill_gal"] = min(cfg["fill_gal"], c.tank_gal)
+    save_fuelctl(cfg)
+    return await _fuel_status()
+
+@app.post("/api/fuel/fill")
+async def api_fuel_fill(f: FuelFill):
+    cfg = load_fuelctl()
+    lvl = cfg["tank_gal"] if f.gal is None else f.gal
+    if not 0 <= lvl <= cfg["tank_gal"]:
+        raise HTTPException(400, f"level must be 0..{cfg['tank_gal']} gal")
+    cfg["fill_gal"], cfg["fill_ts"] = lvl, int(datetime.now().timestamp())
+    save_fuelctl(cfg)
+    return await _fuel_status()
 
 # ----------------------------------------------------------------------------- maintenance log
 # A user-entered service logbook (oil, filters, plugs, etc.) — manual notes only, distinct from the
