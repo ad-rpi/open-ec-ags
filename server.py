@@ -1019,14 +1019,18 @@ async def api_quickrun(r: QuickRunReq):
         raise HTTPException(409, "not connected")
     running = _gen_state() in RUN_CYCLE_STATES
     until = datetime.now() + timedelta(minutes=r.minutes)
-    if running and _quickrun_until is not None:
-        # already on a quick run → just re-arm the timer (extend or shorten it)
-        _quickrun_until, _quickrun_min = until, r.minutes
-        _log_quickrun(f"timer re-armed to {r.minutes} min")
-        return {"ok": True, "extended": True, "minutes": r.minutes}
     if running:
-        # running for some other reason (a rule, the panel, a plain start) → don't impose a stop timer on it
-        return {"ok": True, "noop": "already running (not a quick run) — stop it first or let it finish"}
+        # Already running — for ANY reason (a rule, the panel, a plain start, or an existing quick run).
+        # Adopt it: arm/re-arm the auto-stop timer so "time left to run" now applies to whatever is up. We
+        # do NOT re-issue a start (it's already going) and there's no cold-short-cycle concern to warm up
+        # for — it's already warm. If a rule started it and owns it, the quick-run stop fires a normal
+        # RPC_STOP_GEN and the rule's transition-release drops its ownership, so nothing fights us.
+        adopting = _quickrun_until is None
+        _quickrun_until, _quickrun_min = until, r.minutes
+        if _quickrun_started_ts is None:
+            _quickrun_started_ts = datetime.now()   # anchor the "did the start take?" grace window
+        _log_quickrun(f"{'adopted running genset' if adopting else 'timer re-armed'} → {r.minutes} min")
+        return {"ok": True, "extended": True, "adopted": adopting, "minutes": r.minutes}
     try:
         async with mgr.lock:
             await mgr.require().send_rpc(ag.RPC_START_GEN)

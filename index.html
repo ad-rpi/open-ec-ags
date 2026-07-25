@@ -881,6 +881,7 @@ async function quickRun(minutes){
   if(busy) return; busy=true;
   try{ const r = await api('POST','/api/quickrun',{minutes});
        toast(r.noop ? ('quick run — '+r.noop)
+           : r.adopted ? ('auto-stop set: '+minutes+' min left ✓')
            : r.extended ? ('quick run set to '+minutes+' min ✓')
            : (minutes+' min quick run started ✓')); }
   catch(e){ toast('✗ '+e.message); } finally{ busy=false; poll(); }
