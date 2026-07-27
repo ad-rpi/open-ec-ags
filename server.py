@@ -1316,7 +1316,7 @@ async def _fuel_status():
     reserve_gal = round(tank * rf, 1)
     out = {**cfg, "reserve_gal": reserve_gal, "used_since_fill_gal": None,
            "remaining_gal": None, "usable_gal": None, "hours_left": None,
-           "gal_per_day": None, "days_since_fill": None,
+           "gal_per_day": None, "days_since_fill": None, "days_left": None,
            "cost_since_fill": None, "cost_per_day": None}
     if cfg.get("fill_ts"):
         run_sec = await asyncio.to_thread(_db_run_seconds_since, cfg["fill_ts"])
@@ -1329,6 +1329,11 @@ async def _fuel_status():
                     "usable_gal": round(usable, 1),
                     "hours_left": round(usable / gph, 1) if gph > 0 else None,
                     "gal_per_day": round(used / days, 2), "days_since_fill": round(days, 1)})
+        # days of usable fuel left AT the average burn since fill (not the padded gph — this uses actual
+        # observed use/day). Needs some run history to be meaningful; None until the genset has burned some.
+        gpd = used / days
+        if gpd > 0:
+            out["days_left"] = round(usable / gpd, 1)
         if price:
             out["cost_since_fill"] = round(used * price, 2)
             out["cost_per_day"] = round(used * price / days, 2)
