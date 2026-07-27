@@ -1316,17 +1316,20 @@ async def _fuel_status():
     reserve_gal = round(tank * rf, 1)
     out = {**cfg, "reserve_gal": reserve_gal, "used_since_fill_gal": None,
            "remaining_gal": None, "usable_gal": None, "hours_left": None,
+           "gal_per_day": None, "days_since_fill": None,
            "cost_since_fill": None, "cost_per_day": None}
     if cfg.get("fill_ts"):
         run_sec = await asyncio.to_thread(_db_run_seconds_since, cfg["fill_ts"])
         used = run_sec / 3600.0 * gph
         remaining = max(0.0, cfg.get("fill_gal", tank) - used)
         usable = max(0.0, remaining - reserve_gal)
+        # floor the span at 1h so a just-logged fill doesn't divide by ~0 and report a wild rate
+        days = max(1 / 24.0, (int(datetime.now().timestamp()) - int(cfg["fill_ts"])) / 86400.0)
         out.update({"used_since_fill_gal": round(used, 1), "remaining_gal": round(remaining, 1),
                     "usable_gal": round(usable, 1),
-                    "hours_left": round(usable / gph, 1) if gph > 0 else None})
+                    "hours_left": round(usable / gph, 1) if gph > 0 else None,
+                    "gal_per_day": round(used / days, 2), "days_since_fill": round(days, 1)})
         if price:
-            days = max(1 / 24.0, (int(datetime.now().timestamp()) - int(cfg["fill_ts"])) / 86400.0)
             out["cost_since_fill"] = round(used * price, 2)
             out["cost_per_day"] = round(used * price / days, 2)
     return out

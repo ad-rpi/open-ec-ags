@@ -356,6 +356,7 @@
       <div class="stat"><div class="n" id="st_run">—</div><div class="l">Runtime (range)</div></div>
       <div class="stat"><div class="n" id="st_starts">—</div><div class="l">Starts (range)</div></div>
       <div class="stat"><div class="n" id="st_fuel">—</div><div class="l">Fuel used (range, est)</div></div>
+      <div class="stat"><div class="n" id="st_gpd">—</div><div class="l">Avg gal/day (since fill)</div></div>
     </div>
     <div class="card">
       <h3 style="margin-top:0">House battery voltage <span class="muted" id="st_vrange"></span></h3>
@@ -544,6 +545,7 @@ async function renderFuel(){
   $('#fuelReservePct').value = Math.round(f.reserve_frac*100);
   $('#fuelPrice').value = f.gas_price ?? '';
   $('#fuelReserveMark').style.left = (f.reserve_frac*100)+'%';
+  $('#st_gpd').textContent = f.gal_per_day==null ? '—' : f.gal_per_day+' gal';
   const pct = f.remaining_gal==null ? 0 : Math.max(0, Math.min(100, f.remaining_gal/f.tank_gal*100));
   $('#fuelFill').style.width = pct+'%';
   $('#fuelFill').style.background = (f.usable_gal!=null && f.usable_gal<=0) ? '#f85149'
@@ -555,8 +557,9 @@ async function renderFuel(){
     let html = `≈ <b>${f.remaining_gal}</b> / ${f.tank_gal} gal in tank · `+
       `<b>${f.usable_gal}</b> gal usable before the ¼ cutoff · `+
       `~<b>${f.hours_left==null?'—':f.hours_left} h</b> runtime left.`;
+    if(f.gal_per_day!=null) html += ` Averaging <b>${f.gal_per_day}</b> gal/day.`;
     if(f.cost_since_fill!=null) html += ` <b>$${f.cost_since_fill}</b> since fill (~$${f.cost_per_day}/day).`;
-    html += ` <span class="muted">(at ${f.gal_per_hr} gal/hr; ${f.used_since_fill_gal} gal used since fill)</span>`;
+    html += ` <span class="muted">(at ${f.gal_per_hr} gal/hr; ${f.used_since_fill_gal} gal used over ${f.days_since_fill} days)</span>`;
     $('#fuelSummary').innerHTML = html;
   }
 }
