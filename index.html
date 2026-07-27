@@ -547,7 +547,7 @@ async function renderFuel(){
   $('#fuelPrice').value = f.gas_price ?? '';
   $('#fuelReserveMark').style.left = (f.reserve_frac*100)+'%';
   $('#st_gpd').textContent = f.gal_per_day==null ? '—' : f.gal_per_day+' gal';
-  $('#st_remain').textContent = f.remaining_gal==null ? '—' : '≈ '+f.remaining_gal+' gal';
+  $('#st_remain').textContent = f.usable_gal==null ? '—' : '≈ '+f.usable_gal+' gal';
   const pct = f.remaining_gal==null ? 0 : Math.max(0, Math.min(100, f.remaining_gal/f.tank_gal*100));
   $('#fuelFill').style.width = pct+'%';
   $('#fuelFill').style.background = (f.usable_gal!=null && f.usable_gal<=0) ? '#f85149'
