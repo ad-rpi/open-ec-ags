@@ -1435,6 +1435,83 @@ async def api_maint_del(nid: str):
     save_maintenance([n for n in load_maintenance() if n.get("id") != nid])
     return {"ok": True}
 
+# ----------------------------------------------------------------------------- estimated engine hours
+# The tested genset reports no hour meter, so this ESTIMATES current engine hours: an anchor reading
+# (the physical Hobbs, or the hours on the most recent maintenance note) PLUS all run-time the dashboard
+# has logged since that anchor. Re-anchor to the real Hobbs any time — same idea as the fuel "Set level".
+# Only counts run-time in the stats DB, so an anchor older than the sample history under-counts; re-anchor
+# to the Hobbs to true it up. Anchor lives in hoursctl.json (gitignored — personal rig data).
+HOURSCTL_PATH = os.path.join(HERE, "hoursctl.json")
+
+def load_hoursctl():
+    try:
+        with open(HOURSCTL_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"hours": None, "ts": None}
+
+def save_hoursctl(c):
+    _atomic_write(HOURSCTL_PATH, c)
+
+class HoursReset(BaseModel):
+    hours: float | None = None    # physical Hobbs reading; omit to snapshot the current estimate
+
+def _maint_hours_anchor():
+    """Most recent maintenance note carrying an hours reading → (hours, unix_ts), or None."""
+    best = None
+    for n in load_maintenance():
+        if n.get("hours") is None:
+            continue
+        d = (n.get("date") or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+            continue
+        try:
+            ts = datetime.strptime(d, "%Y-%m-%d").timestamp()
+        except ValueError:
+            continue
+        if best is None or ts > best[1]:
+            best = (float(n["hours"]), ts)
+    return best
+
+async def _hours_status():
+    cfg = load_hoursctl()
+    anchor_hours = anchor_ts = source = None
+    if cfg.get("hours") is not None and cfg.get("ts"):
+        anchor_hours, anchor_ts, source = float(cfg["hours"]), int(cfg["ts"]), "reset"
+    else:
+        m = _maint_hours_anchor()
+        if m:
+            anchor_hours, anchor_ts, source = m[0], int(m[1]), "maintenance"
+    out = {"est_hours": None, "anchor_hours": None, "anchor_ts": None,
+           "run_since_hours": None, "source": source}
+    if source:
+        run_sec = await asyncio.to_thread(_db_run_seconds_since, anchor_ts)
+        run_hrs = run_sec / 3600.0
+        out.update({"est_hours": round(anchor_hours + run_hrs, 1),
+                    "anchor_hours": round(anchor_hours, 1), "anchor_ts": anchor_ts,
+                    "run_since_hours": round(run_hrs, 1)})
+    return out
+
+@app.get("/api/hours")
+async def api_hours_get():
+    return await _hours_status()
+
+@app.post("/api/hours")
+async def api_hours_reset(r: HoursReset):
+    """Re-anchor the hours estimate. Pass the physical Hobbs reading, or omit `hours` to snapshot the
+    current estimate as the new anchor. Either way, logged run-time starts accruing again from now."""
+    if r.hours is not None:
+        if not (0 <= r.hours <= 100000):
+            raise HTTPException(400, "hours out of range (0..100000)")
+        hours = float(r.hours)
+    else:
+        cur = await _hours_status()
+        if cur["est_hours"] is None:
+            raise HTTPException(400, "no estimate yet — enter the current Hobbs reading")
+        hours = cur["est_hours"]
+    save_hoursctl({"hours": hours, "ts": int(datetime.now().timestamp())})
+    return await _hours_status()
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     with open(os.path.join(HERE, "index.html")) as f:

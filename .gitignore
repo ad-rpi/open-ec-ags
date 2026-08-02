@@ -27,3 +27,4 @@ stats.db
 primectl.json
 maintenance.json
 fuelctl.json
+hoursctl.json

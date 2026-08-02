@@ -359,6 +359,7 @@
       <div class="stat"><div class="n" id="st_gpd">—</div><div class="l">Avg gal/day (since fill)</div></div>
       <div class="stat"><div class="n" id="st_remain">—</div><div class="l">Est. genset fuel remaining</div></div>
       <div class="stat"><div class="n" id="st_daysleft">—</div><div class="l">Est. days remaining</div></div>
+      <div class="stat"><div class="n" id="st_hours">—</div><div class="l">Est. engine hours</div></div>
     </div>
     <div class="card">
       <h3 style="margin-top:0">House battery voltage <span class="muted" id="st_vrange"></span></h3>
@@ -371,6 +372,16 @@
       <div class="chartwrap"><canvas id="socChart"></canvas></div>
       <div class="muted" style="margin-top:8px">Coarse 4-level gauge (0 / 33 / 66 / 100). Last genset start:
         <b id="st_laststart">—</b>.</div>
+    </div>
+    <div class="card" id="hoursCard">
+      <h3 style="margin-top:0">Estimated engine hours <span class="muted">(no hour meter — anchor + logged run-time)</span></h3>
+      <div class="muted" id="hoursSummary" style="margin-top:4px">—</div>
+      <div class="row" style="gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+        <input id="hoursHobbs" type="number" step="0.1" placeholder="Hobbs hrs" style="width:100px">
+        <button class="act green" onclick="hoursSetHobbs()">Set to Hobbs</button>
+        <button class="act ghost" onclick="hoursResetCurrent()">Reset to current est.</button>
+        <span class="muted" style="font-size:12px">…re-anchor to the physical meter any time</span>
+      </div>
     </div>
     <div class="card" id="fuelCard">
       <h3 style="margin-top:0">Genset fuel <span class="muted">(estimated from run-time — no tank sensor)</span></h3>
@@ -572,6 +583,29 @@ async function fuelFillUp(){
   try{ await api('POST','/api/fuel/fill',{}); toast('⛽ Tank marked full'); renderFuel(); }
   catch(e){ toast('✗ '+e.message); }
 }
+async function renderHours(){
+  let h; try{ h = await api('GET','/api/hours'); }catch(e){ return; }
+  $('#st_hours').textContent = h.est_hours==null ? '—' : '≈ '+h.est_hours+' h';
+  if(h.est_hours==null){
+    $('#hoursSummary').innerHTML = 'No hours anchor yet — enter the current Hobbs reading below '+
+      '(or add a maintenance note with hours) to start the estimate.';
+  } else {
+    const src = h.source==='reset' ? 'anchor' : 'last service';
+    $('#hoursSummary').innerHTML = `≈ <b>${h.est_hours}</b> engine hours — `+
+      `${h.anchor_hours} at ${src} + <b>${h.run_since_hours}</b> h logged since.`;
+  }
+}
+async function hoursSetHobbs(){
+  const v = parseFloat($('#hoursHobbs').value);
+  if(isNaN(v)){ toast('Enter the Hobbs reading'); return; }
+  try{ await api('POST','/api/hours',{hours:v}); toast('🕒 Hours anchored to '+v);
+       $('#hoursHobbs').value=''; renderHours(); }
+  catch(e){ toast('✗ '+e.message); }
+}
+async function hoursResetCurrent(){
+  try{ const h = await api('POST','/api/hours',{}); toast('🕒 Anchored to current est. ('+h.est_hours+' h)'); renderHours(); }
+  catch(e){ toast('✗ '+e.message); }
+}
 async function fuelSetLevel(){
   const g = parseFloat($('#fuelSetGal').value);
   if(isNaN(g)){ toast('Enter gallons'); return; }
@@ -601,6 +635,7 @@ async function loadStats(){
   $('#st_laststart').textContent = fmtWhen(sm.last_start_ts);
   $('#st_vrange').textContent = s.t.length ? '' : '· no samples yet';
   renderFuel();
+  renderHours();
   const vpts   = s.t.map((t,i)=>({x:t, y:s.v[i]}));
   const runpts = s.t.map((t,i)=>({x:t, y:s.run[i]}));
   const socpts = s.t.map((t,i)=>({x:t, y:s.soc[i]}));
