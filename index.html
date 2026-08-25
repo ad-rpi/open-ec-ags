@@ -124,6 +124,7 @@
         <button class="act ghost" onclick="quickRun(60)">60 min</button>
       </div>
       <div class="muted" id="quickRunStatus" style="margin-top:6px;display:none"></div>
+      <div class="muted" id="nextStart" style="margin-top:6px;display:none"></div>
       <label class="row" style="justify-content:center;gap:10px;margin-top:14px;cursor:pointer">
         <span class="k">App automation</span>
         <span class="switch"><input type="checkbox" id="autoSwitch" onchange="setAutomation(this.checked)"><span class="slider"></span></span>
@@ -462,6 +463,21 @@ async function api(method, path, body){
   return r.headers.get('content-type')?.includes('json') ? r.json() : r.text();
 }
 const fmtClock = ts => ts ? new Date(ts*1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '—';
+// "Today 2:45 PM" / "Tomorrow 1:30 AM" / "Fri 4:00 PM" — day label relative to the local calendar day.
+// NB: distinct from fmtWhen() below (which takes ms); this one takes epoch SECONDS.
+function fmtSchedWhen(ts){
+  const d = new Date(ts*1000), clock = fmtClock(ts);
+  const dayDiff = Math.round((new Date(d).setHours(0,0,0,0) - new Date().setHours(0,0,0,0))/86400000);
+  const day = dayDiff===0 ? 'Today' : dayDiff===1 ? 'Tomorrow'
+            : d.toLocaleDateString([], {weekday:'short'});
+  return `${day} ${clock}`;
+}
+// Coarse countdown: "3h 12m" / "45m" / "<1m".
+function fmtCountdown(sec){
+  if(sec==null||sec<60) return '<1m';
+  const h=Math.floor(sec/3600), m=Math.floor(sec%3600/60);
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
 
 // tabs
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
@@ -711,6 +727,16 @@ async function poll(){
       qEl.innerHTML = `⏱ Auto-stop in <b>${m}:${ss}</b> (≈${fmtClock(qr.until_ts)}) `
         + `<button class="act ghost" style="padding:2px 8px;font-size:12px;margin-left:6px" onclick="cancelQuickRun()">Cancel</button>`;
     } else { qEl.style.display='none'; }
+    // Next scheduled start (soonest enabled 'start' schedule), with a one-shot Skip for just that fire
+    const ns = s.next_start, nsEl = $('#nextStart');
+    if(ns){ nsEl.style.display='block';
+      const bstyle = 'padding:2px 8px;font-size:12px;margin-left:6px';
+      nsEl.innerHTML = ns.skipped
+        ? `📅 Next scheduled start: <b><s>${fmtSchedWhen(ns.ts)}</s></b> — skipping this one`
+          + `<button class="act ghost" style="${bstyle}" onclick="skipNextStart(false)">Undo</button>`
+        : `📅 Next scheduled start: <b>${fmtSchedWhen(ns.ts)}</b> (in ${fmtCountdown(ns.in_sec)})`
+          + `<button class="act ghost" style="${bstyle}" onclick="skipNextStart(true)">Skip</button>`; }
+    else { nsEl.style.display='none'; }
     // Current-run fuel estimate — shown only while running
     const fr = s.fuel_run, frEl = $('#runFuel');
     if(fr){ frEl.style.display='block';
@@ -932,6 +958,13 @@ async function quickRun(minutes){
 async function cancelQuickRun(){
   if(busy) return; busy=true;
   try{ await api('DELETE','/api/quickrun'); toast('auto-stop cancelled — still running'); }
+  catch(e){ toast('✗ '+e.message); } finally{ busy=false; poll(); }
+}
+async function skipNextStart(on){
+  if(busy) return; busy=true;
+  try{ const r = await api('POST','/api/schedules/skip_next',{enabled:on});
+       toast(on ? ('next start ('+fmtSchedWhen(r.skipped.ts)+') will be skipped ✓')
+                : 'skip cancelled — next start will run'); }
   catch(e){ toast('✗ '+e.message); } finally{ busy=false; poll(); }
 }
 async function setAutomation(on){

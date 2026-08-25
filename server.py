@@ -206,7 +206,8 @@ async def api_state():
             "name": mgr.name, "telemetry": (mgr.ags.telemetry if mgr.ags else {}),
             "autoconnect": mgr.autoconnect, "last": load_state().get("last"),
             "automation_enabled": automation_enabled(), "priming": load_primectl(),
-            "quickrun": _quickrun_status(), "fuel_run": _current_run_fuel()}
+            "quickrun": _quickrun_status(), "fuel_run": _current_run_fuel(),
+            "next_start": next_scheduled_start()}
 
 class AutomationReq(BaseModel):
     enabled: bool
@@ -430,6 +431,12 @@ async def scheduler_loop():
             now = datetime.now()
             hhmm = now.strftime("%H:%M")
             stamp = now.strftime("%Y-%m-%dT%H:%M")
+            # One-shot user cancel of a specific upcoming start fire (POST /api/schedules/skip_next).
+            # Purge once its minute has passed so a marker orphaned by a schedule edit can't linger.
+            skip = load_state().get("skip_next_start")
+            if skip and skip.get("stamp", "") < stamp:
+                st = load_state(); st.pop("skip_next_start", None); save_state(st)
+                skip = None
             for e in load_schedules():
                 if not e.get("enabled") or e.get("time") != hhmm:
                     continue
@@ -438,6 +445,13 @@ async def scheduler_loop():
                 if _sched_fired.get(e["id"]) == stamp:
                     continue
                 _sched_fired[e["id"]] = stamp
+                if (skip and e["action"] == "start"
+                        and skip.get("id") == e["id"] and skip.get("stamp") == stamp):
+                    st = load_state(); st.pop("skip_next_start", None); save_state(st)
+                    skip = None
+                    _sched_log.append(f"{stamp}  start → {e.get('device')}  SKIPPED (cancelled by user)")
+                    del _sched_log[:-50]
+                    continue
                 try:
                     await _scheduler_fire(e)
                     msg = f"{stamp}  {e['action']} → {e.get('device')}  OK"
@@ -499,6 +513,55 @@ async def api_autoconnect(a: AutoConnectReq):
     if a.enabled:
         mgr.user_disconnected = False   # re-arm; the loop will reconnect
     return {"ok": True}
+
+def next_scheduled_start(now=None):
+    """Soonest upcoming enabled 'start' fire across all schedules, searched over the next 7 days.
+    Returns {"ts": epoch, "time": "HH:MM", "in_sec": n, "device": addr} or None if nothing scheduled.
+    Wall-clock/local time, matching scheduler_loop. Same-minute is treated as already fired (>= skips)."""
+    now = now or datetime.now()
+    best = None
+    for e in load_schedules():
+        if not e.get("enabled") or e.get("action") != "start":
+            continue
+        try:
+            hh, mm = (int(x) for x in e["time"].split(":"))
+        except (ValueError, KeyError):
+            continue
+        days = e.get("days", [])
+        for d in range(8):                       # today .. +7 days (covers weekly wrap-around)
+            cand = (now + timedelta(days=d)).replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if cand <= now or cand.weekday() not in days:
+                continue
+            if best is None or cand < best[0]:
+                best = (cand, e)
+            break                                # earliest matching day for THIS entry
+    if best is None:
+        return None
+    cand, e = best
+    skip = load_state().get("skip_next_start") or {}
+    stamp = cand.strftime("%Y-%m-%dT%H:%M")
+    return {"ts": int(cand.timestamp()), "time": e["time"], "id": e["id"],
+            "in_sec": int((cand - now).total_seconds()), "device": e.get("device"),
+            "skipped": skip.get("id") == e["id"] and skip.get("stamp") == stamp}
+
+class SkipNextReq(BaseModel):
+    enabled: bool = True    # true = arm skip for the current next start; false = un-skip
+
+@app.post("/api/schedules/skip_next")
+async def api_skip_next(r: SkipNextReq):
+    """One-shot cancel of the next upcoming scheduled start (schedule entries stay untouched).
+    Arms a marker for that specific fire (entry id + minute); the scheduler consumes or expires it."""
+    st = load_state()
+    if not r.enabled:
+        st.pop("skip_next_start", None); save_state(st)
+        return {"ok": True, "skipped": None}
+    ns = next_scheduled_start()
+    if not ns:
+        raise HTTPException(404, "no upcoming scheduled start")
+    st["skip_next_start"] = {"id": ns["id"],
+                             "stamp": datetime.fromtimestamp(ns["ts"]).strftime("%Y-%m-%dT%H:%M")}
+    save_state(st)
+    return {"ok": True, "skipped": ns}
 
 @app.get("/api/schedules")
 async def api_sched_list():
