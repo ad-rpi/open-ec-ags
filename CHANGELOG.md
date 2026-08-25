@@ -2,6 +2,15 @@
 
 What's changed in the generator dashboard, newest first.
 
+## 2026-08-24
+- **Next scheduled start, with a Skip button.** The Control tab now shows the soonest upcoming
+  scheduled start ("Today 8:45 PM, in 16m"). A one-tap **Skip** cancels just that one start —
+  the schedule itself is untouched and runs normally from the next slot on. Undo re-arms it,
+  and the skip survives a server restart. For the nights you shut the genset down by hand and
+  don't want it waking you back up.
+- Note: the App automation toggle gates the battery and temperature rules only — it has never
+  stopped scheduled starts. Skip is the tool for that.
+
 ## 2026-06-16
 - **Battery auto start/stop: added a cooldown.** After the generator stops — whether the rule
   stopped it, you stopped it by hand, or a safety cutoff did — the rule now waits a set "min off"
