@@ -2,6 +2,11 @@
 
 What's changed in the generator dashboard, newest first.
 
+## 2026-08-26
+- **Quick-run timers now outrank scheduled stops.** If you've asked for "run 60 minutes," a
+  standing scheduled stop no longer cuts it short — the quick-run timer does the stopping.
+  The suppressed stop is spent, not deferred, and shows in the schedule log as SUPPRESSED.
+
 ## 2026-08-24
 - **Next scheduled start, with a Skip button.** The Control tab now shows the soonest upcoming
   scheduled start ("Today 8:45 PM, in 16m"). A one-tap **Skip** cancels just that one start —

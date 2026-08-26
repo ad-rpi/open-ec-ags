@@ -452,6 +452,14 @@ async def scheduler_loop():
                     _sched_log.append(f"{stamp}  start → {e.get('device')}  SKIPPED (cancelled by user)")
                     del _sched_log[:-50]
                     continue
+                # An explicit quick-run timer outranks a standing scheduled stop: someone asked for
+                # "run N minutes", so let that timer do the stopping. The suppressed stop is spent
+                # (marked fired above), not deferred — it won't fire late when the timer expires.
+                if e["action"] == "stop" and _quickrun_until is not None and _quickrun_until > now:
+                    left = int((_quickrun_until - now).total_seconds() / 60)
+                    _sched_log.append(f"{stamp}  stop → {e.get('device')}  SUPPRESSED (quick run: {left}m left)")
+                    del _sched_log[:-50]
+                    continue
                 try:
                     await _scheduler_fire(e)
                     msg = f"{stamp}  {e['action']} → {e.get('device')}  OK"
