@@ -39,48 +39,36 @@ SOCCTL_PATH = os.path.join(HERE, "socctl.json")    # low-house-SOC auto start/st
 STATS_PATH = os.path.join(HERE, "stats.db")        # telemetry history (SQLite) for the Stats tab
 PRIMECTL_PATH = os.path.join(HERE, "primectl.json")  # opt-in manual fuel-prime feature
 
-# ----------------------------------------------------------------------------- devices store
-def load_devices():
+# ----------------------------------------------------------------------------- JSON stores
+# Every persisted config/data file goes through these two helpers. _load_json hands back a fresh
+# copy of `default` when the file is missing or corrupt; merge=True overlays the file onto
+# `default`, so keys added in code later still get sane values on files written by older versions.
+def _load_json(path, default, merge=False):
     try:
-        with open(DEVICES_PATH) as f:
-            return json.load(f)
+        with open(path) as f:
+            data = json.load(f)
+        return {**default, **data} if merge else data
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-def save_devices(d):
-    _atomic_write(DEVICES_PATH, d)
-
-def load_schedules():
-    try:
-        with open(SCHEDULES_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-def save_schedules(s):
-    _atomic_write(SCHEDULES_PATH, s)
-
-def load_state():
-    try:
-        with open(STATE_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-def save_state(s):
-    _atomic_write(STATE_PATH, s)
-
-def automation_enabled():
-    """Master server-side gate: is THIS app allowed to issue automated start/stop (voltage + temp rules)?
-    Persisted in state.json, default on. Completely independent of the genset's built-in auto mode, which
-    we never use (enabling it cranks the engine unconditionally — confirmed bug)."""
-    return load_state().get("automation_enabled", True)
+        return json.loads(json.dumps(default))   # fresh copy — callers may mutate then save
 
 def _atomic_write(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(obj, f, indent=2)
     os.replace(tmp, path)
+
+def load_devices():     return _load_json(DEVICES_PATH, {})
+def save_devices(d):    _atomic_write(DEVICES_PATH, d)
+def load_schedules():   return _load_json(SCHEDULES_PATH, [])
+def save_schedules(s):  _atomic_write(SCHEDULES_PATH, s)
+def load_state():       return _load_json(STATE_PATH, {})
+def save_state(s):      _atomic_write(STATE_PATH, s)
+
+def automation_enabled():
+    """Master server-side gate: is THIS app allowed to issue automated start/stop (voltage + temp rules)?
+    Persisted in state.json, default on. Completely independent of the genset's built-in auto mode, which
+    we never use (enabling it cranks the engine unconditionally — confirmed bug)."""
+    return load_state().get("automation_enabled", True)
 
 # States in which the engine is in its start/run cycle (i.e. NOT stopped). One source of truth for
 # the auto rules and the activity watcher so they can't drift apart (the copy-pasted literal is what
@@ -349,14 +337,14 @@ async def api_history(raw: bool = False):
     active = faultcodes.lookup(active_code) if active_code else None
     return {"active_fault": active, "events": events}
 
+@app.get("/api/version")
+async def api_version():
+    return await mgr.op(lambda a: a.get_sw_version())
+
 # ----------------------------------------------------------------------------- remote temp sensors
 class AddSensor(BaseModel):
     mac: str
     zone: str = ""
-
-@app.get("/api/version")
-async def api_version():
-    return await mgr.op(lambda a: a.get_sw_version())
 
 @app.get("/api/sensors")
 async def api_sensors_list():
@@ -471,57 +459,6 @@ async def scheduler_loop():
             pass
         await asyncio.sleep(20)
 
-async def autoconnect_loop():
-    while True:
-        try:
-            if (mgr.autoconnect and not mgr.user_disconnected
-                    and mgr.state in ("disconnected", "error")):
-                tgt = mgr.autoconnect_target()
-                if tgt:
-                    addr, dev = tgt
-                    try:
-                        await mgr.connect(addr, dev.get("password", ""), dev.get("name"))
-                    except Exception:
-                        pass   # out of range / asleep — try again next cycle
-        except Exception:
-            pass
-        await asyncio.sleep(15)
-
-_bg_tasks = []      # background loops, tracked so shutdown can cancel them cleanly (no "Task was
-                    # destroyed but it is pending!" on restart — matters for the Pi/systemd future)
-
-@app.on_event("startup")
-async def _on_startup():
-    mgr.autoconnect = load_state().get("autoconnect", True)
-    _bg_tasks.append(asyncio.create_task(scheduler_loop()))
-    _bg_tasks.append(asyncio.create_task(autoconnect_loop()))
-    _bg_tasks.append(asyncio.create_task(temp_control_loop()))
-    # SOC rule retired in favour of the voltage rule below (single battery authority). The loop +
-    # endpoints are kept for the lithium-era revert (flat LFP curve → SOC+shunt beats voltage); re-add
-    # this line and its UI card then. Not registering it means a stale socctl.json can't reactivate it.
-    # _bg_tasks.append(asyncio.create_task(soc_control_loop()))
-    _bg_tasks.append(asyncio.create_task(volt_control_loop()))
-    _bg_tasks.append(asyncio.create_task(stats_sampler_loop()))
-    _bg_tasks.append(asyncio.create_task(event_watch_loop()))
-    _bg_tasks.append(asyncio.create_task(quickrun_loop()))
-
-@app.on_event("shutdown")
-async def _on_shutdown():
-    for t in _bg_tasks:
-        t.cancel()
-    await asyncio.gather(*_bg_tasks, return_exceptions=True)     # let each unwind its CancelledError
-
-class AutoConnectReq(BaseModel):
-    enabled: bool
-
-@app.post("/api/autoconnect")
-async def api_autoconnect(a: AutoConnectReq):
-    mgr.autoconnect = a.enabled
-    st = load_state(); st["autoconnect"] = a.enabled; save_state(st)
-    if a.enabled:
-        mgr.user_disconnected = False   # re-arm; the loop will reconnect
-    return {"ok": True}
-
 def next_scheduled_start(now=None):
     """Soonest upcoming enabled 'start' fire across all schedules, searched over the next 7 days.
     Returns {"ts": epoch, "time": "HH:MM", "in_sec": n, "device": addr} or None if nothing scheduled.
@@ -605,15 +542,8 @@ async def api_sched_delete(sid: str):
 TEMPCTL_DEFAULT = {"enabled": False, "source": "genset",
                    "start_below": 5.0, "stop_above": 12.0, "min_run_min": 20}
 
-def load_tempctl():
-    try:
-        with open(TEMPCTL_PATH) as f:
-            return {**TEMPCTL_DEFAULT, **json.load(f)}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return dict(TEMPCTL_DEFAULT)
-
-def save_tempctl(c):
-    _atomic_write(TEMPCTL_PATH, c)
+def load_tempctl():  return _load_json(TEMPCTL_PATH, TEMPCTL_DEFAULT, merge=True)
+def save_tempctl(c): _atomic_write(TEMPCTL_PATH, c)
 
 class TempRule(BaseModel):
     enabled: bool = False
@@ -648,6 +578,11 @@ def _current_temp():
         return (mgr.ags.telemetry.get("temp") or {}).get("remote_temp")
     return None
 
+# GUARDS (vs the volt rule, the most-evolved sibling): HAS hysteresis, min-run, only-stop-what-we-
+# started, external-stop release, stale-ownership release, inactive release. DELIBERATELY OMITS the
+# min-off cooldown — temperature doesn't rebound the way surface charge does, and freeze protection
+# shouldn't sit out a cooldown. If a guard is added to the volt loop, decide explicitly whether it
+# belongs here too; don't assume.
 async def temp_control_loop():
     global _temp_started, _temp_start_ts, _temp_prev_running
     while True:
@@ -728,15 +663,8 @@ async def api_tempctl_set(r: TempRule):
 # thresholds must straddle those buckets — defaults start at ⅓ (≤33) and stop at ⅔ (≥66).
 SOCCTL_DEFAULT = {"enabled": False, "start_below": 33, "stop_above": 66, "min_run_min": 30}
 
-def load_socctl():
-    try:
-        with open(SOCCTL_PATH) as f:
-            return {**SOCCTL_DEFAULT, **json.load(f)}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return dict(SOCCTL_DEFAULT)
-
-def save_socctl(c):
-    _atomic_write(SOCCTL_PATH, c)
+def load_socctl():  return _load_json(SOCCTL_PATH, SOCCTL_DEFAULT, merge=True)
+def save_socctl(c): _atomic_write(SOCCTL_PATH, c)
 
 class SocRule(BaseModel):
     enabled: bool = False
@@ -826,15 +754,8 @@ VOLTCTL_PATH = os.path.join(HERE, "voltctl.json")
 VOLTCTL_DEFAULT = {"enabled": False, "start_below": 12.2, "stop_above": 14.4,
                    "min_run_min": 45, "min_off_min": 20}
 
-def load_voltctl():
-    try:
-        with open(VOLTCTL_PATH) as f:
-            return {**VOLTCTL_DEFAULT, **json.load(f)}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return dict(VOLTCTL_DEFAULT)
-
-def save_voltctl(c):
-    _atomic_write(VOLTCTL_PATH, c)
+def load_voltctl():  return _load_json(VOLTCTL_PATH, VOLTCTL_DEFAULT, merge=True)
+def save_voltctl(c): _atomic_write(VOLTCTL_PATH, c)
 
 class VoltRule(BaseModel):
     enabled: bool = False
@@ -871,6 +792,9 @@ def _house_volts(avg=False):
         return None
     return dc.get("house_v")
 
+# GUARDS: the full set — hysteresis, min-run, min-off cooldown (any stop, ours or external), only-
+# stop-what-we-started, external-stop release, stale-ownership release, inactive release. This loop
+# is the reference implementation; the temp loop above carries a documented subset (no min-off).
 async def volt_control_loop():
     global _volt_started, _volt_start_ts, _volt_stop_ts, _volt_prev_running
     while True:
@@ -971,15 +895,8 @@ async def api_changelog():
 PRIMECTL_DEFAULT = {"enabled": False, "duration_sec": 5}
 PRIME_MAX_SEC = 60
 
-def load_primectl():
-    try:
-        with open(PRIMECTL_PATH) as f:
-            return {**PRIMECTL_DEFAULT, **json.load(f)}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return dict(PRIMECTL_DEFAULT)
-
-def save_primectl(c):
-    _atomic_write(PRIMECTL_PATH, c)
+def load_primectl():  return _load_json(PRIMECTL_PATH, PRIMECTL_DEFAULT, merge=True)
+def save_primectl(c): _atomic_write(PRIMECTL_PATH, c)
 
 class PrimeRule(BaseModel):
     enabled: bool = False
@@ -1352,15 +1269,8 @@ FUELCTL_PATH = os.path.join(HERE, "fuelctl.json")
 FUELCTL_DEFAULT = {"gal_per_hr": 0.45, "tank_gal": 55.0, "reserve_frac": 0.25,
                    "fill_gal": 55.0, "fill_ts": None, "gas_price": None}
 
-def load_fuelctl():
-    try:
-        with open(FUELCTL_PATH) as f:
-            return {**FUELCTL_DEFAULT, **json.load(f)}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return dict(FUELCTL_DEFAULT)
-
-def save_fuelctl(c):
-    _atomic_write(FUELCTL_PATH, c)
+def load_fuelctl():  return _load_json(FUELCTL_PATH, FUELCTL_DEFAULT, merge=True)
+def save_fuelctl(c): _atomic_write(FUELCTL_PATH, c)
 
 class FuelConfig(BaseModel):
     gal_per_hr: float
@@ -1462,15 +1372,8 @@ async def api_fuel_fill(f: FuelFill):
 # back-dating is allowed. Stored in maintenance.json (gitignored — personal rig data, not for the repo).
 MAINT_PATH = os.path.join(HERE, "maintenance.json")
 
-def load_maintenance():
-    try:
-        with open(MAINT_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-def save_maintenance(m):
-    _atomic_write(MAINT_PATH, m)
+def load_maintenance():  return _load_json(MAINT_PATH, [])
+def save_maintenance(m): _atomic_write(MAINT_PATH, m)
 
 class MaintNote(BaseModel):
     note: str
@@ -1514,15 +1417,8 @@ async def api_maint_del(nid: str):
 # to the Hobbs to true it up. Anchor lives in hoursctl.json (gitignored — personal rig data).
 HOURSCTL_PATH = os.path.join(HERE, "hoursctl.json")
 
-def load_hoursctl():
-    try:
-        with open(HOURSCTL_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"hours": None, "ts": None}
-
-def save_hoursctl(c):
-    _atomic_write(HOURSCTL_PATH, c)
+def load_hoursctl():  return _load_json(HOURSCTL_PATH, {"hours": None, "ts": None})
+def save_hoursctl(c): _atomic_write(HOURSCTL_PATH, c)
 
 class HoursReset(BaseModel):
     hours: float | None = None    # physical Hobbs reading; omit to snapshot the current estimate
@@ -1582,6 +1478,59 @@ async def api_hours_reset(r: HoursReset):
         hours = cur["est_hours"]
     save_hoursctl({"hours": hours, "ts": int(datetime.now().timestamp())})
     return await _hours_status()
+
+# ----------------------------------------------------------------------------- lifecycle & autoconnect
+# Registered last so every background loop above is already defined. Startup spins up the loops;
+# shutdown cancels them cleanly (no "Task was destroyed but it is pending!" on restart).
+async def autoconnect_loop():
+    while True:
+        try:
+            if (mgr.autoconnect and not mgr.user_disconnected
+                    and mgr.state in ("disconnected", "error")):
+                tgt = mgr.autoconnect_target()
+                if tgt:
+                    addr, dev = tgt
+                    try:
+                        await mgr.connect(addr, dev.get("password", ""), dev.get("name"))
+                    except Exception:
+                        pass   # out of range / asleep — try again next cycle
+        except Exception:
+            pass
+        await asyncio.sleep(15)
+
+class AutoConnectReq(BaseModel):
+    enabled: bool
+
+@app.post("/api/autoconnect")
+async def api_autoconnect(a: AutoConnectReq):
+    mgr.autoconnect = a.enabled
+    st = load_state(); st["autoconnect"] = a.enabled; save_state(st)
+    if a.enabled:
+        mgr.user_disconnected = False   # re-arm; the loop will reconnect
+    return {"ok": True}
+
+_bg_tasks = []      # background loops, tracked so shutdown can cancel them cleanly
+
+@app.on_event("startup")
+async def _on_startup():
+    mgr.autoconnect = load_state().get("autoconnect", True)
+    _bg_tasks.append(asyncio.create_task(scheduler_loop()))
+    _bg_tasks.append(asyncio.create_task(autoconnect_loop()))
+    _bg_tasks.append(asyncio.create_task(temp_control_loop()))
+    # SOC rule retired in favour of the voltage rule (single battery authority). The loop +
+    # endpoints are kept for the lithium-era revert (flat LFP curve → SOC+shunt beats voltage); re-add
+    # this line and its UI card then. Not registering it means a stale socctl.json can't reactivate it.
+    # _bg_tasks.append(asyncio.create_task(soc_control_loop()))
+    _bg_tasks.append(asyncio.create_task(volt_control_loop()))
+    _bg_tasks.append(asyncio.create_task(stats_sampler_loop()))
+    _bg_tasks.append(asyncio.create_task(event_watch_loop()))
+    _bg_tasks.append(asyncio.create_task(quickrun_loop()))
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    for t in _bg_tasks:
+        t.cancel()
+    await asyncio.gather(*_bg_tasks, return_exceptions=True)     # let each unwind its CancelledError
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
