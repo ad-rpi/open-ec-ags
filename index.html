@@ -452,6 +452,7 @@
 <script src="/static/chart.umd.js"></script>
 <script src="/static/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script>
+// ---- Helpers, API wrapper, shared formatters ----
 const $ = s => document.querySelector(s);
 const escapeHtml = s => (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let connected = false, busy = false, load_devices_cache = {};
@@ -479,7 +480,7 @@ function fmtCountdown(sec){
   return h ? `${h}h ${m}m` : `${m}m`;
 }
 
-// tabs
+// ---- Tabs ----
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
@@ -495,6 +496,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==='settings'){ renderSettings(); loadPrimeCtl(); loadChangelog(); }
 });
 
+// ---- Rule cards: cold-start (temp) + battery voltage ----
 async function loadTempCtl(){
   try{
     const c = await api('GET','/api/tempctl');
@@ -695,6 +697,7 @@ for(let i=0;i<3;i++){ zEl.insertAdjacentHTML('beforeend',
    <div><label>Start above (°)</label><input type="number" id="z${i}temp"></div></div>`); }
 
 // state polling
+// ---- Poll loop: live state driving the Control tab ----
 async function poll(){
   try{
     const s = await api('GET','/api/state');
@@ -749,6 +752,7 @@ async function poll(){
     renderTelemetry(s.telemetry||{});
   }catch(e){ $('#connText').textContent='server error'; }
 }
+// ---- Telemetry metrics: definitions + Control-tab rendering ----
 function fmtRun(sec){ if(sec==null) return '—'; const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60); return `${h}h ${m}m`; }
 const FV = {
   raw:(v,u)=> v==null?'—':(''+v+(u?' '+u:'')),
@@ -821,6 +825,7 @@ function renderTelemetry(t){
   $('#genSub').textContent = '';   // app automation state is shown on the toggle (set from /api/state in poll)
   updateMetrics(t);
 }
+// ---- Changelog viewer (Settings tab card) ----
 async function loadChangelog(){
   const el = $('#changelogBody');
   try{
@@ -839,6 +844,7 @@ function renderMarkdown(md){
   }).join('');
 }
 
+// ---- Settings tab: metric visibility toggles ----
 function renderSettings(){
   const row = m => `<label class="row" style="cursor:pointer"><span class="k">${m.label}</span>
         <input type="checkbox" ${visible[m.k]?'checked':''} onchange="toggleMetric('${m.k}',this.checked)"></label>`;
@@ -868,6 +874,7 @@ const EV_LABEL = { started:'▶ Started', stopped:'■ Stopped', auto_on:'⚙ Ge
 const EV_COLOR = { started:'var(--green)', fault:'var(--red)' };
 const CAUSE_LABEL = { voltage_rule:'voltage rule', temp_rule:'temp rule', schedule:'schedule',
                       quick_run:'quick run', manual:'manual', 'manual/genset':'manual / genset', genset:'genset' };
+// ---- History tab: activity log + genset fault history ----
 async function loadEvents(){
   $('#activityList').innerHTML='<span class="muted">Loading…</span>';
   try{
@@ -941,6 +948,7 @@ async function addMaintenance(){
 }
 async function delMaintenance(id){ await api('DELETE','/api/maintenance/'+id); loadMaintenance(); }
 
+// ---- Control actions: start/stop, quick run, skip-next, automation master ----
 async function cmd(c){
   if(busy) return; busy=true;
   try{ const r = await api('POST','/api/command/'+c); toast(r&&r.noop ? (c+' ignored — '+r.noop) : (c+' sent ✓')); }
@@ -975,6 +983,7 @@ async function setAutomation(on){
 }
 
 // scan / devices
+// ---- Devices tab: scan / save / connect / pair ----
 async function scan(){
   $('#scanBtn').disabled=true; $('#scanList').textContent='Scanning…';
   try{
@@ -1035,6 +1044,7 @@ async function delDev(addr){ await api('DELETE','/api/devices/'+addr); refreshSa
 $('#discBtn').onclick=async()=>{ await api('POST','/api/disconnect'); toast('disconnected'); };
 
 // auto params
+// ---- Genset built-in auto params (diagnostics only — see the ⚠ do-not-enable card) ----
 async function loadAuto(){
   try{
     const a = await api('GET','/api/auto');
@@ -1052,6 +1062,7 @@ async function saveAuto(){
   try{ await api('POST','/api/auto',body); toast('auto settings saved ✓'); }catch(e){ toast('✗ '+e.message); }
 }
 // quiet
+// ---- Quiet Time tab ----
 function hhmm(sec){ sec%=86400; const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60);
   return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
 function toSec(v){ const [h,m]=(v||'0:0').split(':').map(Number); return h*3600+m*60; }
@@ -1067,7 +1078,7 @@ async function saveQuiet(){
   try{ await api('POST','/api/quiet',body); toast('quiet time saved ✓'); }catch(e){ toast('✗ '+e.message); }
 }
 
-// schedule
+// ---- Schedule tab ----
 function updatePrimeRow(){
   $('#s_prime_row').style.display = (window._primingEnabled && $('#s_action').value==='start') ? 'flex' : 'none';
 }
