@@ -76,11 +76,10 @@ rules, schedules, history, and stats charts) is in `server.py` + `index.html`.
   time, and it only stops a run it started itself). Runs on this machine, so the server must be up —
   the upside is full visibility and one single place that decides when the genset runs.
 
-  > ⚠️ **The genset's built-in auto mode is deliberately not used.** On the tested unit, enabling
-  > built-in auto mode immediately cranked the engine even with every trigger (battery sense, A/C
-  > sense, temperature zones) disabled. This app sends auto-OFF on every connect to keep it disarmed,
-  > and the built-in settings are shown for diagnostics only. If your unit behaves differently,
-  > reports welcome — but test with care.
+  > ⚠️ **The genset's built-in auto mode is deliberately not used** — on the tested unit, enabling
+  > it cranks the engine unconditionally. See [Known issue: built-in auto mode](#known-issue-enabling-built-in-auto-mode-cranks-the-engine-unconditionally)
+  > for the full write-up. This app sends auto-OFF on every connect to keep it disarmed, and the
+  > built-in settings are shown for diagnostics only.
 * **Temperature Startup tab** — two separate mechanisms: **Hot start (A/C)** is the genset's own
   feature (zone goes *above* a setpoint → start, for air conditioning; works without this dashboard
   but requires the built-in auto mode — see the warning above). **Cold start (heater)** is a
@@ -114,6 +113,14 @@ scheduler to fire reliably, leave the server running (use the systemd unit below
 > trusted home machine. The dashboard binds to `0.0.0.0` (so you can reach the Pi from your phone) and
 > has no auth — keep it on your private network, or change `host` to `127.0.0.1` in `server.py`.
 
+### macOS menu bar widget (optional)
+
+`menubar.py` puts live genset state in the macOS menu bar (🟢/🟠/⚪️ + state) with quick
+Start / Stop / Reset-fault actions and a link to the dashboard. It's a thin client of the
+dashboard server — it never opens its own BLE connection (the genset only allows one) — so start
+`server.py` first. `pip install rumps`, then `.venv/bin/python menubar.py`; point `AGS_DASH` at
+the server if it isn't on `localhost:8722`.
+
 ### Run it on the Raspberry Pi at boot
 
 Edit paths in `ags-dashboard.service`, then:
@@ -133,6 +140,38 @@ genset. The `password` is whatever you set in the official app. If the generator
 a password (the `scan` output says `UNREGISTERED`), the password is the device's **macId** shown by
 `scan`.
 
+## Known issue: enabling built-in auto mode cranks the engine unconditionally
+
+On the tested unit (Cummins Onan QG 4000 with the EC-AGS+ controller), **turning on the built-in
+auto (AGS) mode starts the engine about 2 seconds later, every time, regardless of whether any
+auto-start condition is met**. An unexpected engine start is a safety concern: an owner may enable
+auto mode expecting it to *arm monitoring*, not to crank the engine — possibly while servicing the
+unit or with the rig in an enclosed space.
+
+**Reproduction** (instrumented, repeated on demand, June 2026):
+
+1. Generator stopped, fault log cleared (fault = 0).
+2. Every auto-start trigger disabled and verified via the controller's own advanced parameters:
+   battery sense **off**, A/C sense **off**, all three temperature zones **off**.
+3. House battery at a healthy 12.5–12.9 V — well above the 11.7 V auto-start threshold.
+4. Enable auto mode. The engine cranks and starts ~2 s later.
+
+This reproduces with the **official vendor app's own Auto toggle** — it sends the same enable-auto
+command (opcode 2572) this project does, and the command provably contains no start instruction
+(start is a separate opcode, 2509). The controller starts the engine purely on receiving "enter
+auto mode."
+
+**Scope:** confirmed on one unit and firmware; other EC-AGS+ installs may behave differently.
+If yours does (or doesn't), a report is welcome — but test with the genset somewhere a surprise
+start is safe.
+
+**Disclosure timeline:** reported to the vendor through their support channel on June 9, 2026 with
+reproduction steps; the ticket was closed in August 2026, unactioned, for having been in the queue
+longer than a month.
+
+**Mitigation:** leave built-in auto mode off. This dashboard sends auto-OFF on every connect to
+keep it disarmed, and provides its own condition-checked start/stop rules and scheduler instead.
+
 ## Status / notes
 
 * **Tested hardware:** confirmed working on a **Cummins Onan QG 4000** (with the EC-AGS+ controller) —
@@ -150,4 +189,7 @@ a password (the `scan` output says `UNREGISTERED`), the password is the device's
   `agscli.py` replicates this. Control commands (start/stop/status) are single-chunk.
 * Bring your own device: you'll need the official app once to set/learn your generator's password.
   No decompiled app source is included in this repo.
+* **Codec tests:** `.venv/bin/python -m unittest test_codec` exercises the RPC encoder/parser, CRC,
+  auth derivation, and telemetry decoders against frames frozen from the hardware-verified encoder —
+  no BLE or generator needed.
 
